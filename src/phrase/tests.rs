@@ -24,7 +24,7 @@ fn insert_phrases_memory() {
     let mut keys = vec![];
     let mut stream = phrase_set.into_stream();
     while let Some(key) = stream.next() {
-        keys.push(key.to_vec());
+        keys.push(key.0.to_vec());
     }
     assert_eq!(
         keys,
@@ -63,7 +63,7 @@ fn insert_phrases_file() {
     let mut keys = vec![];
     let mut stream = phrase_set.into_stream();
     while let Some(key) = stream.next() {
-        keys.push(key.to_vec());
+        keys.push(key.0.to_vec());
     }
     assert_eq!(
         keys,
@@ -422,6 +422,7 @@ lazy_static! {
             phrase.split(' ').map(|w| WORDS[w]).collect::<Vec<_>>()
         }).collect::<Vec<_>>();
         id_phrases.sort();
+        id_phrases.dedup();
         for id_phrase in id_phrases {
             builder.insert(&id_phrase).unwrap();
         }

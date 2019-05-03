@@ -183,6 +183,7 @@ impl FuzzyPhraseSetBuilder {
         }
 
         self.phrases.sort();
+        self.phrases.dedup();
 
         let phrase_writer = BufWriter::new(fs::File::create(self.directory.join(Path::new("phrase.fst")))?);
         let mut phrase_set_builder = PhraseSetBuilder::new(phrase_writer)?;

@@ -6,8 +6,8 @@ use std::io;
 use std::path::Path;
 
 use fst;
-use fst::{IntoStreamer, Set, SetBuilder, Streamer};
-use fst::raw::{CompiledAddr, Node};
+use fst::{IntoStreamer, Streamer};
+use fst::raw::{CompiledAddr, Node, Fst, Builder};
 
 use self::util::{word_ids_to_key};
 use self::util::PhraseSetError;
@@ -17,7 +17,7 @@ use self::query::{QueryPhrase, QueryWord};
 
 type WordKey = [u8; 3];
 
-pub struct PhraseSet(Set);
+pub struct PhraseSet(Fst);
 
 /// PhraseSet is a lexicographically ordered set of phrases.
 ///
@@ -41,14 +41,14 @@ impl PhraseSet {
             return Err(PhraseSetError::new("The query submitted has a QueryWord::Prefix. Set::contains only accepts QueryWord:Full"));
         }
         let key = phrase.full_word_key();
-        Ok(self.0.contains(key))
+        Ok(self.0.contains_key(key))
     }
 
     /// Test whether a query phrase can be found at the beginning of any phrase in the Set. Also
     /// known as a "starts with" search.
     pub fn contains_prefix(&self, phrase: QueryPhrase) -> Result<bool, PhraseSetError>  {
         let key = phrase.full_word_key();
-        let fst = self.0.as_fst();
+        let fst = &self.0;
         let root_addr = fst.root().addr();
         match self.partial_search(root_addr, &key) {
             None => Ok(false),
@@ -71,7 +71,7 @@ impl PhraseSet {
     ) -> Result<Vec<Vec<QueryWord>>, PhraseSetError> {
         // this is just a thin wrapper around a private recursive function, with most of the
         // arguments prefilled
-        let fst = self.0.as_fst();
+        let fst = &self.0;
         let root = fst.root();
         let mut out: Vec<Vec<QueryWord>> = Vec::new();
         self.exact_recurse(word_possibilities, 0, &root, max_phrase_dist, Vec::new(), &mut out)?;
@@ -87,7 +87,7 @@ impl PhraseSet {
         so_far: Vec<QueryWord>,
         out: &mut Vec<Vec<QueryWord>>,
     ) -> Result<(), PhraseSetError> {
-        let fst = self.0.as_fst();
+        let fst = &self.0;
 
         for word in possibilities[position].iter() {
             let (key, edit_distance) = match word {
@@ -146,7 +146,7 @@ impl PhraseSet {
     ) -> Result<Vec<Vec<QueryWord>>, PhraseSetError> {
         // this is just a thin wrapper around a private recursive function, with most of the
         // arguments prefilled
-        let fst = self.0.as_fst();
+        let fst = &self.0;
         let root = fst.root();
         let mut out: Vec<Vec<QueryWord>> = Vec::new();
         self.prefix_recurse(word_possibilities, 0, &root, max_phrase_dist, Vec::new(), &mut out)?;
@@ -162,7 +162,7 @@ impl PhraseSet {
         so_far: Vec<QueryWord>,
         out: &mut Vec<Vec<QueryWord>>,
     ) -> Result<(), PhraseSetError> {
-        let fst = self.0.as_fst();
+        let fst = &self.0;
 
         for word in possibilities[position].iter() {
             match word {
@@ -229,7 +229,7 @@ impl PhraseSet {
     ) -> Result<Vec<(Vec<QueryWord>, bool)>, PhraseSetError> {
         // this is just a thin wrapper around a private recursive function, with most of the
         // arguments prefilled
-        let fst = self.0.as_fst();
+        let fst = &self.0;
         let root = fst.root();
         let mut out: Vec<(Vec<QueryWord>, bool)> = Vec::new();
         self.window_recurse(word_possibilities, 0, &root, max_phrase_dist, ends_in_prefix, Vec::new(), &mut out)?;
@@ -246,7 +246,7 @@ impl PhraseSet {
         so_far: Vec<QueryWord>,
         out: &mut Vec<(Vec<QueryWord>, bool)>,
     ) -> Result<(), PhraseSetError> {
-        let fst = self.0.as_fst();
+        let fst = &self.0;
 
         for word in possibilities[position].iter() {
             match word {
@@ -320,7 +320,7 @@ impl PhraseSet {
     /// Helper function for doing a byte-by-byte walk through the phrase graph, staring at any
     /// arbitrary node. Not to be used directly.
     fn partial_search(&self, start_addr: CompiledAddr, key: &[u8]) -> Option<CompiledAddr> {
-        let fst = self.0.as_fst();
+        let fst = &self.0;
         let mut node = fst.node(start_addr);
         // move through the tree byte by byte
         for b in key {
@@ -336,7 +336,7 @@ impl PhraseSet {
         let (sought_min_key, sought_max_key) = key_range;
 
 		// self as fst
-        let fst = &self.0.as_fst();
+        let fst = &self.0;
 
         // get min value greater than or qual to the sought min
         let node0 = fst.node(start_position);
@@ -380,52 +380,54 @@ impl PhraseSet {
 
     /// Create from a raw byte sequence, which must be written by `PhraseSetBuilder`.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, fst::Error> {
-        Set::from_bytes(bytes).map(PhraseSet)
+        Fst::from_bytes(bytes).map(PhraseSet)
     }
 
     #[cfg(feature = "mmap")]
     pub unsafe fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, fst::Error> {
-        Set::from_path(path).map(PhraseSet)
+        Fst::from_path(path).map(PhraseSet)
     }
 
 }
 
 impl<'s, 'a> IntoStreamer<'a> for &'s PhraseSet {
-    type Item = &'a [u8];
-    type Into = fst::set::Stream<'s>;
+    type Item = (&'a [u8], fst::raw::Output);
+    type Into = fst::raw::Stream<'s>;
 
     fn into_stream(self) -> Self::Into {
         self.0.stream()
     }
 }
 
-pub struct PhraseSetBuilder<W>(SetBuilder<W>);
+pub struct PhraseSetBuilder<W> {
+    builder: Builder<W>,
+    count: u64
+}
 
 impl PhraseSetBuilder<Vec<u8>> {
     pub fn memory() -> Self {
-        PhraseSetBuilder(SetBuilder::memory())
+        PhraseSetBuilder { builder: Builder::memory(), count: 0 }
     }
-
 }
 
 impl<W: io::Write> PhraseSetBuilder<W> {
-
     pub fn new(wtr: W) -> Result<PhraseSetBuilder<W>, fst::Error> {
-        SetBuilder::new(wtr).map(PhraseSetBuilder)
+        Ok(PhraseSetBuilder { builder: Builder::new_type(wtr, 0)?, count: 0 })
     }
 
     /// Insert a phrase, specified as an array of word identifiers.
     pub fn insert(&mut self, phrase: &[u32]) -> Result<(), fst::Error> {
         let key = word_ids_to_key(phrase);
-        self.0.insert(key)
+        self.builder.insert(key, self.count)?;
+        self.count += 1;
+        Ok(())
     }
 
     pub fn into_inner(self) -> Result<W, fst::Error> {
-        self.0.into_inner()
+        self.builder.into_inner()
     }
 
     pub fn finish(self) -> Result<(), fst::Error> {
-        self.0.finish()
+        self.builder.finish()
     }
-
 }
