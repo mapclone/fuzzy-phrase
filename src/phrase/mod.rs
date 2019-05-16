@@ -6,12 +6,12 @@ use std::io;
 use std::path::Path;
 
 use fst;
-use fst::{IntoStreamer, Streamer};
-use fst::raw::{CompiledAddr, Node, Fst, Builder};
+use fst::IntoStreamer;
+use fst::raw::{CompiledAddr, Node, Fst, Builder, Output};
 
 use self::util::{word_ids_to_key};
 use self::util::PhraseSetError;
-use self::query::{QueryPhrase, QueryWord};
+use self::query::QueryWord;
 
 #[cfg(test)] mod tests;
 
@@ -33,33 +33,41 @@ pub struct PhraseSet(Fst);
 /// | street  | 109821    | [1, 172, 253] |
 ///
 impl PhraseSet {
-
-    /// Test membership of a single phrase. Returns true iff the phrase matches a complete phrase
-    /// in the set. Wraps the underlying Set::contains method.
-    pub fn contains(&self, phrase: QueryPhrase) -> Result<bool, PhraseSetError> {
-        if phrase.has_prefix {
-            return Err(PhraseSetError::new("The query submitted has a QueryWord::Prefix. Set::contains only accepts QueryWord:Full"));
-        }
-        let key = phrase.full_word_key();
-        Ok(self.0.contains_key(key))
-    }
-
-    /// Test whether a query phrase can be found at the beginning of any phrase in the Set. Also
-    /// known as a "starts with" search.
-    pub fn contains_prefix(&self, phrase: QueryPhrase) -> Result<bool, PhraseSetError>  {
-        let key = phrase.full_word_key();
+    pub fn lookup(&self, phrase: &[QueryWord]) -> PhraseSetLookupResult {
         let fst = &self.0;
-        let root_addr = fst.root().addr();
-        match self.partial_search(root_addr, &key) {
-            None => Ok(false),
-            Some(addr) => {
-                if phrase.has_prefix {
-                    Ok(self.matches_prefix_range(addr, phrase.prefix_key_range().unwrap()))
-                } else {
-                    Ok(true)
-                }
+        let mut node = fst.root();
+        let mut output = Output::zero();
+        for word in phrase {
+            match word {
+                QueryWord::Full { key, .. } => {
+                    for b in key.into_iter() {
+                        node = if let Some(i) = node.find_input(*b) {
+                            let t = node.transition(i);
+                            output = output.cat(t.out);
+                            fst.node(t.addr)
+                        } else {
+                            return PhraseSetLookupResult::NotFound;
+                        }
+                    }
+                },
+                QueryWord::Prefix { key_range, .. } => {
+                    match self.matches_prefix_range(
+                        node.addr(),
+                        output,
+                        *key_range
+                    ) {
+                        WordPrefixMatchResult::Found(match_state) => {
+                            // we can return and stop looping -- the prefix is at the end
+                            return PhraseSetLookupResult::Found { fst, match_state: PhraseSetMatchState::EndsInPrefix(match_state) };
+                        },
+                        WordPrefixMatchResult::NotFound => {
+                            return PhraseSetLookupResult::NotFound;
+                        }
+                    }
+                },
             }
         }
+        PhraseSetLookupResult::Found { fst, match_state: PhraseSetMatchState::EndsInFullWord { node, output } }
     }
 
     /// Recursively explore the phrase graph looking for combinations of candidate words to see
@@ -203,8 +211,9 @@ impl PhraseSet {
                     }
                 },
                 QueryWord::Prefix { key_range, .. } => {
-                    if self.matches_prefix_range(
+                    if let WordPrefixMatchResult::Found( .. ) = self.matches_prefix_range(
                         node.addr(),
+                        Output::zero(),
                         *key_range
                     ) {
                         // presumably the prefix is at the end, so we don't need to consider the
@@ -301,8 +310,9 @@ impl PhraseSet {
                             "The query submitted has a QueryWord::Prefix. This function only accepts QueryWord:Full"
                         ))
                     }
-                    if self.matches_prefix_range(
+                    if let WordPrefixMatchResult::Found( .. ) = self.matches_prefix_range(
                         node.addr(),
+                        Output::zero(),
                         *key_range
                     ) {
                         // presumably the prefix is at the end, so we don't need to consider the
@@ -317,28 +327,13 @@ impl PhraseSet {
         Ok(())
     }
 
-    /// Helper function for doing a byte-by-byte walk through the phrase graph, staring at any
-    /// arbitrary node. Not to be used directly.
-    fn partial_search(&self, start_addr: CompiledAddr, key: &[u8]) -> Option<CompiledAddr> {
-        let fst = &self.0;
-        let mut node = fst.node(start_addr);
-        // move through the tree byte by byte
-        for b in key {
-            node = match node.find_input(*b) {
-                None => return None,
-                Some(i) => fst.node(node.transition_addr(i)),
-            }
-        }
-        return Some(node.addr())
-    }
-
-    fn matches_prefix_range(&self, start_position: CompiledAddr, key_range: (WordKey, WordKey)) -> bool {
+    fn matches_prefix_range(&self, start_position: CompiledAddr, start_output: Output, key_range: (WordKey, WordKey)) -> WordPrefixMatchResult {
         let (sought_min_key, sought_max_key) = key_range;
 
 		// self as fst
         let fst = &self.0;
 
-        // get min value greater than or qual to the sought min
+        // get min value greater than or equal to the sought min
         let node0 = fst.node(start_position);
         for t0 in node0.transitions().skip_while(|t| t.inp < sought_min_key[0]) {
             let must_skip1 = t0.inp == sought_min_key[0];
@@ -355,27 +350,49 @@ impl PhraseSet {
                     }
                     // we've got three bytes! woohoo!
                     let mut next_after_min = [t0.inp, t1.inp, t2.inp];
-                    return next_after_min <= sought_max_key;
+
+                    if next_after_min <= sought_max_key {
+                        // we found the first triple after the minimum,
+                        // but we also need the last before the maximum
+
+                        let max_node0 = fst.node(start_position);
+                        for max_t0 in (0..max_node0.len()).rev().map(|i| max_node0.transition(i)).skip_while(|t| t.inp > sought_max_key[0]) {
+                            let max_must_skip1 = max_t0.inp == sought_max_key[0];
+                            let max_node1 = fst.node(max_t0.addr);
+                            for max_t1 in (0..max_node1.len()).rev().map(|i| max_node1.transition(i)) {
+                                if max_must_skip1 && max_t1.inp > sought_max_key[1] {
+                                    continue;
+                                }
+                                let max_must_skip2 = max_must_skip1 && t1.inp == sought_max_key[1];
+                                let max_node2 = fst.node(max_t1.addr);
+                                for max_t2 in (0..max_node2.len()).rev().map(|i| max_node2.transition(i)) {
+                                    if max_must_skip2 && max_t2.inp > sought_max_key[2] {
+                                        continue;
+                                    }
+                                    // we've got three bytes! woohoo!
+                                    return WordPrefixMatchResult::Found(WordPrefixMatchState {
+                                        min_prefix_node: fst.node(t2.addr),
+                                        min_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out),
+                                        max_prefix_node: fst.node(max_t2.addr),
+                                        max_prefix_output: start_output.cat(max_t0.out).cat(max_t1.out).cat(max_t2.out)
+                                    });
+                                }
+                            }
+                        }
+
+                        return WordPrefixMatchResult::Found(WordPrefixMatchState {
+                            min_prefix_node: fst.node(t2.addr),
+                            min_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out),
+                            max_prefix_node: fst.node(t2.addr),
+                            max_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out)
+                        });
+                    } else {
+                        return WordPrefixMatchResult::NotFound;
+                    }
                 }
             }
         }
-        false
-    }
-
-    pub fn range(&self, phrase: QueryPhrase) -> Result<bool, PhraseSetError> {
-        let mut max_key = phrase.full_word_key();
-        let mut min_key = phrase.full_word_key();
-        let (last_id_min, last_id_max) = match phrase.prefix_key_range() {
-            None => return Err(PhraseSetError::new("phrase prefix range() error")),
-            Some(tuple) => tuple
-        };
-        min_key.extend_from_slice(&last_id_min);
-        max_key.extend_from_slice(&last_id_max);
-        let mut range_stream = self.0.range().ge(min_key).le(max_key).into_stream();
-        let _result = match range_stream.next() {
-            Some(..) => return Ok(true),
-            None => return Ok(false),
-        };
+        WordPrefixMatchResult::NotFound
     }
 
     /// Create from a raw byte sequence, which must be written by `PhraseSetBuilder`.
@@ -396,6 +413,118 @@ impl<'s, 'a> IntoStreamer<'a> for &'s PhraseSet {
 
     fn into_stream(self) -> Self::Into {
         self.0.stream()
+    }
+}
+
+pub struct WordPrefixMatchState<'a> {
+    min_prefix_node: Node<'a>,
+    min_prefix_output: Output,
+    max_prefix_node: Node<'a>,
+    max_prefix_output: Output
+}
+
+enum WordPrefixMatchResult<'a> {
+    NotFound,
+    Found(WordPrefixMatchState<'a>)
+}
+
+pub enum PhraseSetMatchState<'a> {
+    EndsInFullWord {
+        node: Node<'a>,
+        output: Output
+    },
+    EndsInPrefix(WordPrefixMatchState<'a>)
+}
+
+impl<'a> PhraseSetMatchState<'a> {
+    // retrieves the min and max IDs of all phrases that begin with the given prefix (which may
+    // itself begin either with a word prefix or a full word)
+    pub fn prefix_range(&self, fst: &'a Fst) -> (Output, Output) {
+        let (min_node, min_output, max_node, max_output) = match self {
+            PhraseSetMatchState::EndsInFullWord { node, output } => {
+                (node, output, node, output)
+            },
+            PhraseSetMatchState::EndsInPrefix(state) => {
+                (&state.min_prefix_node, &state.min_prefix_output, &state.max_prefix_node, &state.max_prefix_output)
+            }
+        };
+
+        let start = min_output.cat(min_node.final_output());
+
+        let mut max_node: Node = max_node.to_owned();
+        let mut max_output: Output = max_output.to_owned();
+
+        while max_node.len() != 0 {
+            let t = max_node.transition(max_node.len() - 1);
+            max_output = max_output.cat(t.out);
+            max_node = fst.node(t.addr);
+        }
+        (start, max_output.cat(max_node.final_output()))
+    }
+}
+
+pub enum PhraseSetLookupResult<'a> {
+    NotFound,
+    Found { fst: &'a Fst, match_state: PhraseSetMatchState<'a> }
+}
+
+impl<'a> PhraseSetLookupResult<'a> {
+    pub fn found(&self) -> bool {
+        match self {
+            PhraseSetLookupResult::NotFound => false,
+            PhraseSetLookupResult::Found {..} => true
+        }
+    }
+
+    pub fn found_final(&self) -> bool {
+        match self {
+            PhraseSetLookupResult::NotFound => false,
+            PhraseSetLookupResult::Found { match_state, .. } => {
+                match match_state {
+                    PhraseSetMatchState::EndsInFullWord { node, .. } => node.is_final(),
+                    PhraseSetMatchState::EndsInPrefix(..) => false
+                }
+            }
+        }
+    }
+
+    pub fn id(&self) -> Option<Output> {
+        match self {
+            PhraseSetLookupResult::NotFound => None,
+            PhraseSetLookupResult::Found { match_state, .. } => {
+                match match_state {
+                    PhraseSetMatchState::EndsInFullWord { node, output } => {
+                        if node.is_final() {
+                            Some(output.cat(node.final_output()))
+                        } else {
+                            None
+                        }
+                    },
+                    PhraseSetMatchState::EndsInPrefix(..) => None
+                }
+            }
+        }
+    }
+
+    pub fn range(&self) -> Option<(Output, Output)> {
+        match self {
+            PhraseSetLookupResult::NotFound => None,
+            PhraseSetLookupResult::Found { fst, match_state } => Some(match_state.prefix_range(fst))
+        }
+    }
+
+    pub fn has_continuations(&self) -> bool {
+        match self {
+            PhraseSetLookupResult::NotFound => false,
+            PhraseSetLookupResult::Found { match_state, .. } => {
+                match match_state {
+                    PhraseSetMatchState::EndsInFullWord { node, .. } => node.len() > 0,
+                    PhraseSetMatchState::EndsInPrefix(state) => {
+                        state.min_prefix_node.len() > 0 || (state.min_prefix_node.addr() != state.max_prefix_node.addr())
+                    }
+                }
+            }
+        }
     }
 }
 

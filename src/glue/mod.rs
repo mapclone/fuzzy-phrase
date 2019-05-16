@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use ::prefix::{PrefixSet, PrefixSetBuilder};
 use ::phrase::{PhraseSet, PhraseSetBuilder};
 use ::phrase::util::PhraseSetError;
-use ::phrase::query::{QueryPhrase, QueryWord};
+use ::phrase::query::QueryWord;
 use ::fuzzy::{FuzzyMap, FuzzyMapBuilder};
 use regex;
 
@@ -341,8 +341,8 @@ impl FuzzyPhraseSet {
                     }
                 }
                 Ok(match ending_type {
-                    EndingType::NonPrefix => self.phrase_set.contains(QueryPhrase::new(&id_phrase)?)?,
-                    _ => self.phrase_set.contains_prefix(QueryPhrase::new(&id_phrase)?)?
+                    EndingType::NonPrefix => self.phrase_set.lookup(&id_phrase).found_final(),
+                    _ => self.phrase_set.lookup(&id_phrase).found()
                 })
             },
             _ => {

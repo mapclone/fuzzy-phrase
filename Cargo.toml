@@ -5,7 +5,7 @@ authors = ["Andrew Pendleton <andrew@mapbox.com>"]
 autobenches = false
 
 [dependencies]
-fst = "0.3.0"
+fst = "0.3.3"
 byteorder = "1.2.2"
 itertools = "0.7.8"
 serde = "1.0"
