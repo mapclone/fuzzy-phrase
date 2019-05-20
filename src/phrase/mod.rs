@@ -335,64 +335,170 @@ impl PhraseSet {
 
         // get min value greater than or equal to the sought min
         let node0 = fst.node(start_position);
-        for t0 in node0.transitions().skip_while(|t| t.inp < sought_min_key[0]) {
-            let must_skip1 = t0.inp == sought_min_key[0];
+        let range0 = match self.find_first_gte(&node0, sought_min_key[0]) {
+            Some(idx) => idx..node0.len(),
+            None => { return WordPrefixMatchResult::NotFound; }
+        };
+        for i0 in range0 {
+            let t0 = node0.transition(i0);
+
             let node1 = fst.node(t0.addr);
-            for t1 in node1.transitions() {
-                if must_skip1 && t1.inp < sought_min_key[1] {
-                    continue;
+            let range1 = if t0.inp == sought_min_key[0] {
+                match self.find_first_gte(&node1, sought_min_key[1]) {
+                    Some(idx) => idx..node1.len(),
+                    None => { continue; }
                 }
-                let must_skip2 = must_skip1 && t1.inp == sought_min_key[1];
+            } else {
+                0..node1.len()
+            };
+            for i1 in range1 {
+                let t1 = node1.transition(i1);
+
                 let node2 = fst.node(t1.addr);
-                for t2 in node2.transitions() {
-                    if must_skip2 && t2.inp < sought_min_key[2] {
-                        continue;
+                let i2 = if node2.len() == 0 {
+                    continue;
+                } else if t1.inp == sought_min_key[1] {
+                    match self.find_first_gte(&node2, sought_min_key[2]) {
+                        Some(idx) => idx,
+                        None => { continue; }
                     }
-                    // we've got three bytes! woohoo!
-                    let mut next_after_min = [t0.inp, t1.inp, t2.inp];
+                } else {
+                    0
+                };
+                let t2 = node2.transition(i2);
 
-                    if next_after_min <= sought_max_key {
-                        // we found the first triple after the minimum,
-                        // but we also need the last before the maximum
+                // we've got three bytes! woohoo!
+                let mut next_after_min = [t0.inp, t1.inp, t2.inp];
 
-                        let max_node0 = fst.node(start_position);
-                        for max_t0 in (0..max_node0.len()).rev().map(|i| max_node0.transition(i)).skip_while(|t| t.inp > sought_max_key[0]) {
-                            let max_must_skip1 = max_t0.inp == sought_max_key[0];
-                            let max_node1 = fst.node(max_t0.addr);
-                            for max_t1 in (0..max_node1.len()).rev().map(|i| max_node1.transition(i)) {
-                                if max_must_skip1 && max_t1.inp > sought_max_key[1] {
-                                    continue;
-                                }
-                                let max_must_skip2 = max_must_skip1 && t1.inp == sought_max_key[1];
-                                let max_node2 = fst.node(max_t1.addr);
-                                for max_t2 in (0..max_node2.len()).rev().map(|i| max_node2.transition(i)) {
-                                    if max_must_skip2 && max_t2.inp > sought_max_key[2] {
-                                        continue;
-                                    }
-                                    // we've got three bytes! woohoo!
-                                    return WordPrefixMatchResult::Found(WordPrefixMatchState {
-                                        min_prefix_node: fst.node(t2.addr),
-                                        min_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out),
-                                        max_prefix_node: fst.node(max_t2.addr),
-                                        max_prefix_output: start_output.cat(max_t0.out).cat(max_t1.out).cat(max_t2.out)
-                                    });
-                                }
+                if next_after_min <= sought_max_key {
+                    // we found the first triple after the minimum,
+                    // but we also need the last before the maximum
+
+                    let max_node0 = fst.node(start_position);
+                    let max_range0 = match self.find_last_lte(&max_node0, sought_max_key[0]) {
+                        Some(idx) => (0..(idx + 1)).rev(),
+                        None => { return WordPrefixMatchResult::NotFound; }
+                    };
+                    for max_i0 in max_range0 {
+                        let max_t0 = max_node0.transition(max_i0);
+
+                        let max_node1 = fst.node(max_t0.addr);
+                        let max_range1 = if max_t0.inp == sought_min_key[0] {
+                            match self.find_last_lte(&max_node1, sought_max_key[1]) {
+                                Some(idx) => (0..(idx + 1)).rev(),
+                                None => { continue; }
                             }
-                        }
+                        } else {
+                            (0..max_node1.len()).rev()
+                        };
+                        for max_i1 in max_range1 {
+                            let max_t1 = max_node1.transition(max_i1);
 
-                        return WordPrefixMatchResult::Found(WordPrefixMatchState {
-                            min_prefix_node: fst.node(t2.addr),
-                            min_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out),
-                            max_prefix_node: fst.node(t2.addr),
-                            max_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out)
-                        });
-                    } else {
-                        return WordPrefixMatchResult::NotFound;
+                            let max_node2 = fst.node(max_t1.addr);
+                            let max_i2 = if max_node2.len() == 0 {
+                                continue;
+                            } else if max_t1.inp == sought_min_key[1] {
+                                match self.find_last_lte(&max_node2, sought_max_key[2]) {
+                                    Some(idx) => idx,
+                                    None => { continue; }
+                                }
+                            } else {
+                                0
+                            };
+                            let max_t2 = max_node2.transition(max_i2);
+
+                            // we've got three bytes! woohoo!
+                            return WordPrefixMatchResult::Found(WordPrefixMatchState {
+                                min_prefix_node: fst.node(t2.addr),
+                                min_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out),
+                                max_prefix_node: fst.node(max_t2.addr),
+                                max_prefix_output: start_output.cat(max_t0.out).cat(max_t1.out).cat(max_t2.out)
+                            });
+                        }
                     }
+
+                    return WordPrefixMatchResult::Found(WordPrefixMatchState {
+                        min_prefix_node: fst.node(t2.addr),
+                        min_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out),
+                        max_prefix_node: fst.node(t2.addr),
+                        max_prefix_output: start_output.cat(t0.out).cat(t1.out).cat(t2.out)
+                    });
+                } else {
+                    return WordPrefixMatchResult::NotFound;
                 }
             }
         }
         WordPrefixMatchResult::NotFound
+    }
+
+    #[inline(always)]
+    fn find_first_gte(&self, node: &Node, inp: u8) -> Option<usize> {
+        let len = node.len();
+        match len {
+            0 => None,
+            1 => {
+                let trans = node.transition(0);
+                if trans.inp >= inp {
+                    Some(0)
+                } else {
+                    None
+                }
+            },
+            _ => {
+                let mut low: usize = 0;
+                let mut high: usize = len;
+                let mut mid: usize;
+                while low != high {
+                    mid = (low + high) >> 1;
+                    let trans = node.transition(mid);
+                    if trans.inp < inp {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                if high < len {
+                    Some(high)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn find_last_lte(&self, node: &Node, inp: u8) -> Option<usize> {
+        let len = node.len() as isize;
+        match len {
+            0 => None,
+            1 => {
+                let trans = node.transition(0);
+                if trans.inp <= inp {
+                    Some(0)
+                } else {
+                    None
+                }
+            },
+            _ => {
+                let mut low: isize = -1;
+                let mut high: isize = len - 1;
+                let mut mid: isize;
+                while low != high {
+                    mid = ((low + high) >> 1) + 1;
+                    let trans = node.transition(mid as usize);
+                    if trans.inp <= inp {
+                        low = mid;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+                if high > -1 {
+                    Some(high as usize)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Create from a raw byte sequence, which must be written by `PhraseSetBuilder`.
