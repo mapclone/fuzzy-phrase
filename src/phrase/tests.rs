@@ -104,10 +104,14 @@ fn contains_query() {
     ];
 
     let matching_phrase = [ words[0], words[1], words[2] ];
-    assert_eq!(true, phrase_set.lookup(&matching_phrase).found_final());
+    let result = phrase_set.lookup(&matching_phrase);
+    assert_eq!(true, result.found_final());
+    assert_eq!(0, result.id().unwrap().value());
 
     let missing_phrase = [ words[0], words[1] ];
-    assert_eq!(false, phrase_set.lookup(&missing_phrase).found_final());
+    let result = phrase_set.lookup(&missing_phrase);
+    assert_eq!(false, result.found_final());
+    assert_eq!(true, result.id().is_none());
 
     let prefix = QueryWord::new_prefix((561_528u32, 561_531u32));
     let has_prefix_phrase = [ words[0], words[1], prefix ];
@@ -131,7 +135,10 @@ fn contains_prefix_query() {
     ];
 
     let matching_phrase = [ words[0], words[1] ];
-    assert_eq!(true, phrase_set.lookup(&matching_phrase).found());
+    let result = phrase_set.lookup(&matching_phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((0, 0), (range_start.value(), range_end.value()));
 
     let missing_phrase = [ words[0], words[2] ];
     assert_eq!(false, phrase_set.lookup(&missing_phrase).found());
@@ -165,7 +172,10 @@ fn contains_prefix_range() {
         three_byte_decode(&[255u8, 255u8, 255u8]));
     let matching_prefix_min = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_prefix_min ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((9, 9), (range_start.value(), range_end.value()));
 
     // matches at the max edge of range
     let prefix_id_range = (
@@ -173,7 +183,10 @@ fn contains_prefix_range() {
             three_byte_decode(&[2u8, 1u8, 0u8]));
     let matching_prefix_max = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_prefix_max ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((0, 0), (range_start.value(), range_end.value()));
 
     // range is larger than possible outcomes
     let prefix_id_range = (
@@ -181,7 +194,10 @@ fn contains_prefix_range() {
             three_byte_decode(&[6u8, 5u8, 1u8]));
     let matching_prefix_larger = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_prefix_larger ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((0, 8), (range_start.value(), range_end.value()));
 
     // high side of range overlaps
     let prefix_id_range = (
@@ -189,7 +205,10 @@ fn contains_prefix_range() {
             three_byte_decode(&[2u8, 2u8, 1u8]));
     let matching_prefix_hi = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_prefix_hi ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((0, 0), (range_start.value(), range_end.value()));
 
     // low side of range overlaps
     let prefix_id_range = (
@@ -197,7 +216,10 @@ fn contains_prefix_range() {
             three_byte_decode(&[255u8, 255u8, 255u8]));
     let matching_prefix_low = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_prefix_low ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((9, 9), (range_start.value(), range_end.value()));
 
     // no overlap, too low
     let prefix_id_range = (
@@ -205,7 +227,9 @@ fn contains_prefix_range() {
             three_byte_decode(&[2u8, 0u8, 255u8]));
     let missing_prefix_low = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], missing_prefix_low ];
-    assert_eq!(false, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(false, result.found());
+    assert_eq!(true, result.range().is_none());
 
     // no overlap, too high
     let prefix_id_range = (
@@ -213,7 +237,9 @@ fn contains_prefix_range() {
             three_byte_decode(&[255u8, 255u8, 255u8]));
     let missing_prefix_hi = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], missing_prefix_hi ];
-    assert_eq!(false, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(false, result.found());
+    assert_eq!(true, result.range().is_none());
 
 }
 
@@ -248,7 +274,10 @@ fn contains_prefix_nested_range() {
             three_byte_decode(&[4u8, 3u8, 5u8]));
     let matching_two_bytes = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_two_bytes ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((5, 5), (range_start.value(), range_end.value()));
 
     // does not match because there is no actual path in sought range.
     let prefix_id_range = (
@@ -257,7 +286,9 @@ fn contains_prefix_nested_range() {
             ) ;
     let missing_two_bytes = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], missing_two_bytes ];
-    assert_eq!(false, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(false, result.found());
+    assert_eq!(true, result.range().is_none());
 
     // matches because (4, 1, 1) is in range
     let prefix_id_range = (
@@ -266,7 +297,10 @@ fn contains_prefix_nested_range() {
             ) ;
     let matching_one_byte = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_one_byte ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((4, 4), (range_start.value(), range_end.value()));
 
     // does not match because there is no actual path in sought range.
     let prefix_id_range = (
@@ -275,7 +309,9 @@ fn contains_prefix_nested_range() {
             ) ;
     let missing_one_byte = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], missing_one_byte ];
-    assert_eq!(false, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(false, result.found());
+    assert_eq!(true, result.range().is_none());
 
     // matches because (2, 5, 6) is in range. gives up searching high path because 0 is not in
     // the transitions for the byte after 4, which are [1, 3, 5].
@@ -285,7 +321,10 @@ fn contains_prefix_nested_range() {
             ) ;
     let matching_one_byte_lo = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_one_byte_lo ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((3, 3), (range_start.value(), range_end.value()));
 
     // misses because nothing is in range. gives up searching high path because 0 is not in
     // the transitions for the byte after 4, which are [1, 3, 5].
@@ -295,7 +334,9 @@ fn contains_prefix_nested_range() {
             ) ;
     let missing_one_byte_lo = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], missing_one_byte_lo ];
-    assert_eq!(false, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(false, result.found());
+    assert_eq!(true, result.range().is_none());
 
     // matches because (6, 3, 4) is in range. gives up searching low path because 7 is not in
     // the transitions for the byte after 4, which are [1, 3, 5].
@@ -305,7 +346,10 @@ fn contains_prefix_nested_range() {
             ) ;
     let matching_one_byte_hi = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_one_byte_hi ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((7, 8), (range_start.value(), range_end.value()));
 
     // misses because nothing is in range. gives up searching low path because 7 is not in
     // the transitions for the byte after 4, which are [1, 3, 5].
@@ -315,7 +359,9 @@ fn contains_prefix_nested_range() {
             ) ;
     let missing_one_byte_hi = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], missing_one_byte_hi ];
-    assert_eq!(false, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(false, result.found());
+    assert_eq!(true, result.range().is_none());
 
     // matches because (2, 1, 0) is on the low edge of the actual range, but sought range has
     // same min and max
@@ -325,7 +371,10 @@ fn contains_prefix_nested_range() {
             ) ;
     let matching_edge_low = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_edge_low ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((0, 0), (range_start.value(), range_end.value()));
 
     // matches because (2, 1, 0) is on the low edge of the actual range, but sought range has
     // same min and max
@@ -335,7 +384,10 @@ fn contains_prefix_nested_range() {
             ) ;
     let matching_edge_hi = QueryWord::new_prefix(prefix_id_range);
     let phrase = [ words[0], words[1], matching_edge_hi ];
-    assert_eq!(true, phrase_set.lookup(&phrase).found());
+    let result = phrase_set.lookup(&phrase);
+    assert_eq!(true, result.found());
+    let (range_start, range_end) = result.range().unwrap();
+    assert_eq!((9, 9), (range_start.value(), range_end.value()));
 
 
 }
@@ -354,6 +406,7 @@ lazy_static! {
         phrases.extend(PREFIX_DATA.trim().split("\n").take(5).map(|phrase| {
             phrase.rsplitn(2, " ").skip(1).next().unwrap()
         }));
+        phrases.sort();
         phrases
     };
     static ref WORDS: BTreeMap<&'static str, u32> = {
@@ -393,15 +446,18 @@ lazy_static! {
 
         out
     };
-    static ref SET: PhraseSet = {
-        let mut builder = PhraseSetBuilder::memory();
-
+    static ref ID_PHRASES: Vec<Vec<u32>> = {
         let mut id_phrases = PHRASES.iter().map(|phrase| {
             phrase.split(' ').map(|w| WORDS[w]).collect::<Vec<_>>()
         }).collect::<Vec<_>>();
         id_phrases.sort();
         id_phrases.dedup();
-        for id_phrase in id_phrases {
+        id_phrases
+    };
+    static ref SET: PhraseSet = {
+        let mut builder = PhraseSetBuilder::memory();
+
+        for id_phrase in ID_PHRASES.iter() {
             builder.insert(&id_phrase).unwrap();
         }
         let bytes = builder.into_inner().unwrap();
@@ -424,6 +480,34 @@ fn get_prefix(phrase: &str) -> Vec<QueryWord> {
     let prefix_match = WORDS.iter().filter(|(k, _v)| k.starts_with(last)).collect::<Vec<_>>();
     out.push(QueryWord::new_prefix((*prefix_match[0].1, *prefix_match.last().unwrap().1)));
     out
+}
+
+fn get_expected_range(encoded_phrase: &[QueryWord]) -> Option<(u64, u64)> {
+    let matches = |id_phrase: &Vec<u32>| {
+        if id_phrase.len() < encoded_phrase.len() {
+            false
+        } else {
+            for (i, qw) in encoded_phrase.iter().enumerate() {
+                let matches = match qw {
+                    QueryWord::Full { id, .. } => *id == id_phrase[i],
+                    QueryWord::Prefix { id_range: (start, end), .. } => *start <= id_phrase[i] && *end >= id_phrase[i]
+                };
+                if !matches {
+                    return false;
+                }
+            }
+            true
+        }
+    };
+
+    let seek = ID_PHRASES.iter().position(matches);
+    match seek {
+        Some(start) => {
+            let len = ID_PHRASES[start..].iter().take_while(|m| matches(*m)).count();
+            Some((start as u64, (start + len - 1) as u64))
+        },
+        None => None
+    }
 }
 
 #[test]
@@ -476,6 +560,20 @@ fn sample_contains_prefix() {
     assert!(!contains_prefix("Suchava Dr"));
     // note that we don't test any that include words we don't know about -- in the broader
     // scheme, that's not our job
+}
+
+#[test]
+fn sample_check_prefix_ranges() {
+    let get_range = |phrase| {
+        SET.lookup(&get_prefix(phrase)).range().map(|(a, b)| (a.value(), b.value()))
+    };
+
+    assert_eq!(get_range("8"), get_expected_range(&get_prefix("8")));
+    assert_eq!(get_range("84"), get_expected_range(&get_prefix("84")));
+    assert_eq!(get_range("84#"), get_expected_range(&get_prefix("84#")));
+    assert_eq!(get_range("84# "), get_expected_range(&get_prefix("84# ")));
+    assert_eq!(get_range("84# G"), get_expected_range(&get_prefix("84# G")));
+    assert_eq!(get_range("84# Suchava Dr"), get_expected_range(&get_prefix("84# Suchava Dr")));
 }
 
 fn get_full_variants(phrase: &str) -> Vec<Vec<QueryWord>> {

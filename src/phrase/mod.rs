@@ -343,7 +343,8 @@ impl PhraseSet {
             let t0 = node0.transition(i0);
 
             let node1 = fst.node(t0.addr);
-            let range1 = if t0.inp == sought_min_key[0] {
+            let must_skip1 = t0.inp == sought_min_key[0];
+            let range1 = if must_skip1 {
                 match self.find_first_gte(&node1, sought_min_key[1]) {
                     Some(idx) => idx..node1.len(),
                     None => { continue; }
@@ -355,9 +356,10 @@ impl PhraseSet {
                 let t1 = node1.transition(i1);
 
                 let node2 = fst.node(t1.addr);
+                let must_skip2 = must_skip1 && t1.inp == sought_min_key[1];
                 let i2 = if node2.len() == 0 {
                     continue;
-                } else if t1.inp == sought_min_key[1] {
+                } else if must_skip2 {
                     match self.find_first_gte(&node2, sought_min_key[2]) {
                         Some(idx) => idx,
                         None => { continue; }
@@ -383,7 +385,8 @@ impl PhraseSet {
                         let max_t0 = max_node0.transition(max_i0);
 
                         let max_node1 = fst.node(max_t0.addr);
-                        let max_range1 = if max_t0.inp == sought_min_key[0] {
+                        let max_must_skip1 = max_t0.inp == sought_max_key[0];
+                        let max_range1 = if max_must_skip1 {
                             match self.find_last_lte(&max_node1, sought_max_key[1]) {
                                 Some(idx) => (0..(idx + 1)).rev(),
                                 None => { continue; }
@@ -395,15 +398,16 @@ impl PhraseSet {
                             let max_t1 = max_node1.transition(max_i1);
 
                             let max_node2 = fst.node(max_t1.addr);
+                            let max_must_skip2 = max_must_skip1 && max_t1.inp == sought_max_key[1];
                             let max_i2 = if max_node2.len() == 0 {
                                 continue;
-                            } else if max_t1.inp == sought_min_key[1] {
+                            } else if max_must_skip2 {
                                 match self.find_last_lte(&max_node2, sought_max_key[2]) {
                                     Some(idx) => idx,
                                     None => { continue; }
                                 }
                             } else {
-                                0
+                                max_node2.len() - 1
                             };
                             let max_t2 = max_node2.transition(max_i2);
 
@@ -522,6 +526,7 @@ impl<'s, 'a> IntoStreamer<'a> for &'s PhraseSet {
     }
 }
 
+#[derive(Debug)]
 pub struct WordPrefixMatchState<'a> {
     min_prefix_node: Node<'a>,
     min_prefix_output: Output,
@@ -534,6 +539,7 @@ enum WordPrefixMatchResult<'a> {
     Found(WordPrefixMatchState<'a>)
 }
 
+#[derive(Debug)]
 pub enum PhraseSetMatchState<'a> {
     EndsInFullWord {
         node: Node<'a>,
