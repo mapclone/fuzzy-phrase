@@ -576,6 +576,14 @@ fn sample_check_prefix_ranges() {
     assert_eq!(get_range("84# Suchava Dr"), get_expected_range(&get_prefix("84# Suchava Dr")));
 }
 
+#[test]
+fn sample_check_continuations() {
+    assert_eq!(true, SET.lookup(&get_prefix("8")).has_continuations());
+    assert_eq!(true, SET.lookup(&get_prefix("84# Gleason Hollow")).has_continuations());
+    assert_eq!(false, SET.lookup(&get_prefix("84# Suchava Dr")).has_continuations());
+    assert_eq!(false, SET.lookup(&get_prefix("84# Gleason Suchava")).has_continuations());
+}
+
 fn get_full_variants(phrase: &str) -> Vec<Vec<QueryWord>> {
     phrase.split(' ').map(
         |w| DISTANCES[&WORDS[w]].iter().map(
