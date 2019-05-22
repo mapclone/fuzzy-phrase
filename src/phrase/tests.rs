@@ -482,9 +482,12 @@ fn get_prefix(phrase: &str) -> Vec<QueryWord> {
     out
 }
 
-fn get_expected_range(encoded_phrase: &[QueryWord]) -> Option<(u64, u64)> {
+fn get_expected_range(encoded_phrase: &[QueryWord], exact_match: bool) -> Option<(u64, u64)> {
     let matches = |id_phrase: &Vec<u32>| {
-        if id_phrase.len() < encoded_phrase.len() {
+        if
+            (exact_match && id_phrase.len() != encoded_phrase.len()) ||
+            (id_phrase.len() < encoded_phrase.len())
+        {
             false
         } else {
             for (i, qw) in encoded_phrase.iter().enumerate() {
@@ -507,6 +510,43 @@ fn get_expected_range(encoded_phrase: &[QueryWord]) -> Option<(u64, u64)> {
             Some((start as u64, (start + len - 1) as u64))
         },
         None => None
+    }
+}
+
+fn get_full_combination(phrase: &str) -> Combination {
+    let qw_phrase = get_full(phrase);
+    let range = get_expected_range(&qw_phrase, false).unwrap();
+    Combination {
+        phrase: qw_phrase,
+        output_range: (Output::new(range.0), Output::new(range.1))
+    }
+}
+
+fn get_prefix_combination(phrase: &str) -> Combination {
+    let qw_phrase = get_prefix(phrase);
+    let range = get_expected_range(&qw_phrase, false).unwrap();
+    Combination {
+        phrase: qw_phrase,
+        output_range: (Output::new(range.0), Output::new(range.1))
+    }
+}
+
+fn get_full_window(phrase: &str, ends_in_prefix: bool) -> CombinationWindow {
+    let qw_phrase = get_full(phrase);
+    let range = get_expected_range(&qw_phrase, !ends_in_prefix).unwrap();
+    CombinationWindow {
+        phrase: qw_phrase,
+        output_range: (Output::new(range.0), Output::new(range.1)),
+        ends_in_prefix
+    }
+}
+
+fn get_prefix_window(phrase: &str, ends_in_prefix: bool) -> CombinationWindow {
+    let combination = get_prefix_combination(phrase);
+    CombinationWindow {
+        phrase: combination.phrase,
+        output_range: combination.output_range,
+        ends_in_prefix
     }
 }
 
@@ -568,12 +608,12 @@ fn sample_check_prefix_ranges() {
         SET.lookup(&get_prefix(phrase)).range().map(|(a, b)| (a.value(), b.value()))
     };
 
-    assert_eq!(get_range("8"), get_expected_range(&get_prefix("8")));
-    assert_eq!(get_range("84"), get_expected_range(&get_prefix("84")));
-    assert_eq!(get_range("84#"), get_expected_range(&get_prefix("84#")));
-    assert_eq!(get_range("84# "), get_expected_range(&get_prefix("84# ")));
-    assert_eq!(get_range("84# G"), get_expected_range(&get_prefix("84# G")));
-    assert_eq!(get_range("84# Suchava Dr"), get_expected_range(&get_prefix("84# Suchava Dr")));
+    assert_eq!(get_range("8"), get_expected_range(&get_prefix("8"), false));
+    assert_eq!(get_range("84"), get_expected_range(&get_prefix("84"), false));
+    assert_eq!(get_range("84#"), get_expected_range(&get_prefix("84#"), false));
+    assert_eq!(get_range("84# "), get_expected_range(&get_prefix("84# "), false));
+    assert_eq!(get_range("84# G"), get_expected_range(&get_prefix("84# G"), false));
+    assert_eq!(get_range("84# Suchava Dr"), get_expected_range(&get_prefix("84# Suchava Dr"), false));
 }
 
 #[test]
@@ -617,7 +657,7 @@ fn get_prefix_variants(phrase: &str) -> Vec<Vec<QueryWord>> {
 
 #[test]
 fn sample_match_combinations() {
-    let correct = get_full("53# Country View Dr");
+    let correct = get_full_combination("53# Country View Dr");
     let no_typo = SET.match_combinations(&get_full_variants("53# Country View Dr"), 1).unwrap();
     assert!(no_typo == vec![correct.clone()]);
 
@@ -627,14 +667,14 @@ fn sample_match_combinations() {
 
 #[test]
 fn sample_match_combinations_as_prefixes() {
-    let correct1 = get_prefix("53# Country");
+    let correct1 = get_prefix_combination("53# Country");
     let no_typo1 = SET.match_combinations_as_prefixes(&get_prefix_variants("53# Country"), 1).unwrap();
     assert!(no_typo1 == vec![correct1.clone()]);
 
     let typo1 = SET.match_combinations_as_prefixes(&get_prefix_variants("53# County"), 1).unwrap();
     assert!(typo1 != vec![correct1.clone()]);
 
-    let correct2 = get_prefix("53# Country V");
+    let correct2 = get_prefix_combination("53# Country V");
     let no_typo2 = SET.match_combinations_as_prefixes(&get_prefix_variants("53# Country V"), 1).unwrap();
     assert!(no_typo2 == vec![correct2.clone()]);
 
@@ -648,7 +688,7 @@ fn sample_contains_windows_simple() {
     let max_phrase_dist = 2;
     let ends_in_prefix = false;
     for phrase in PHRASES.iter() {
-        let query_phrase = get_full(phrase);
+        let window = get_full_window(phrase, false);
         let word_possibilities = get_full_variants(phrase);
         let results = SET.match_combinations_as_windows(
             &word_possibilities,
@@ -656,7 +696,7 @@ fn sample_contains_windows_simple() {
             ends_in_prefix
         ).unwrap();
         assert!(results.len() > 0);
-        assert!(results.iter().any(|r| (&r.0, r.1) == (&query_phrase, false)));
+        assert!(results.iter().any(|r| r == &window));
     }
 }
 
@@ -667,9 +707,17 @@ fn sample_match_combinations_as_windows_all_full() {
     for phrase in PHRASES.iter() {
         let mut query_phrase = get_full(phrase);
         let mut word_possibilities = get_full_variants(phrase);
+
         // trim the last element to test prefix functionality
         query_phrase.pop();
         word_possibilities.pop();
+
+        let range = get_expected_range(&query_phrase, false).unwrap();
+        let window = CombinationWindow {
+            phrase: query_phrase,
+            output_range: (Output::new(range.0), Output::new(range.1)),
+            ends_in_prefix: true
+        };
 
         let results = SET.match_combinations_as_windows(
             &word_possibilities,
@@ -678,7 +726,7 @@ fn sample_match_combinations_as_windows_all_full() {
         ).unwrap();
 
         assert!(results.len() > 0);
-        assert!(results.iter().any(|r| (&r.0, r.1) == (&query_phrase, true)));
+        assert!(results.iter().any(|r| r == &window));
     }
 }
 
@@ -687,7 +735,7 @@ fn sample_match_combinations_as_windows_all_prefix() {
     // just test everything
     let max_phrase_dist = 2;
     for phrase in PHRASES.iter() {
-        let query_phrase = get_prefix(phrase);
+        let window = get_prefix_window(phrase, true);
         let word_possibilities = get_prefix_variants(phrase);
 
         let results = SET.match_combinations_as_windows(
@@ -696,7 +744,7 @@ fn sample_match_combinations_as_windows_all_prefix() {
             true
         ).unwrap();
         assert!(results.len() > 0);
-        assert!(results.iter().any(|r| (&r.0, r.1) == (&query_phrase, true)));
+        assert!(results.iter().any(|r| r == &window));
     }
 }
 
@@ -715,9 +763,9 @@ fn sample_prefix_contains_windows_overlap() {
         results,
         vec![
             // this one doesn't end in the prefix
-            (get_full("84# Gleason Hollow"), false),
+            get_full_window("84# Gleason Hollow", false),
             // but this one does
-            (get_prefix("84# Gleason Hollow Rd"), true),
+            get_prefix_window("84# Gleason Hollow Rd", true),
         ]
     );
 }
@@ -731,7 +779,7 @@ fn sample_prefix_contains_windows_substring() {
         1,
         true
     ).unwrap();
-    assert_eq!(results, vec![(get_prefix("59 Old Ne"), true)]);
+    assert_eq!(results, vec![get_prefix_window("59 Old Ne", true)]);
 
     // but this will fail because we can't window-recurse with eip=false and a PrefixWord
     let results = SET.match_combinations_as_windows(
@@ -776,7 +824,7 @@ fn sample_prefix_contains_windows_substring() {
         1,
         true
     ).unwrap();
-    assert_eq!(results, vec![(get_full("59 Old New Milford Rd"), false)]);
+    assert_eq!(results, vec![get_full_window("59 Old New Milford Rd", false)]);
 
     // and should also work with no prefixes
     let word_possibilities = get_full_variants("59 Old New Milford Rd Gleason");
@@ -785,7 +833,7 @@ fn sample_prefix_contains_windows_substring() {
         1,
         false
     ).unwrap();
-    assert_eq!(results, vec![(get_full("59 Old New Milford Rd"), false)]);
+    assert_eq!(results, vec![get_full_window("59 Old New Milford Rd", false)]);
 
     // on the other hand, it still shouldn't work with stuff at the beginning
     let word_possibilities = get_prefix_variants("Gleason 59 Old New Milford Rd");

@@ -139,7 +139,8 @@ fn glue_fuzztest_windowed_multi_equivalent() {
                     phrase: result.phrase.clone(),
                     edit_distance: result.edit_distance,
                     start_position: variant_starts[i],
-                    ending_type: EndingType::NonPrefix
+                    ending_type: EndingType::NonPrefix,
+                    phrase_id_range: result.phrase_id_range
                 });
             }
         }
@@ -210,6 +211,7 @@ fn glue_fuzztest_windowed_multi_equivalent_prefix() {
                     edit_distance: result.edit_distance,
                     start_position: variant_starts[i],
                     ending_type: result.ending_type,
+                    phrase_id_range: result.phrase_id_range
                 });
             }
         }
