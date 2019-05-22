@@ -15,7 +15,7 @@ lazy_static! {
     static ref TEST_SET: FuzzyPhraseSet = {
         let mut builder = FuzzyPhraseSetBuilder::new(&DIRECTORY.path()).unwrap();
 
-        builder.load_word_replacements(REPLACEMENTS.clone());
+        builder.load_word_replacements(REPLACEMENTS.clone()).unwrap();
 
         builder.insert_str("100 main street").unwrap();
         builder.insert_str("100 main st").unwrap();

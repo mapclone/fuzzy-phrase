@@ -32,12 +32,12 @@ pub struct WordReplacement {
 
 #[derive(Default, Debug)]
 pub struct FuzzyPhraseSetBuilder {
-    phrases: Vec<Vec<u32>>,
-    // use a btreemap for this one so we can read them out in order later
-    // we'll only have one copy of each word, in the vector, so the inverse
-    // map will map from a pointer to an int
-    words_to_tmpids: BTreeMap<String, u32>,
+    // order doesn't matter for this one because we'll renumber it anyway
+    phrases: FxHashMap<Vec<u32>, u32>,
+    // use a btreemaps for this one so we can read them out in order later
+    words_to_tmp_word_ids: BTreeMap<String, u32>,
     word_replacements: Vec<WordReplacement>,
+    word_replacement_map: FxHashMap<u32, u32>,
     directory: PathBuf,
 }
 
@@ -77,21 +77,29 @@ impl FuzzyPhraseSetBuilder {
         Ok(FuzzyPhraseSetBuilder { directory, ..Default::default() })
     }
 
-    fn get_or_create_tmpid(&mut self, word: &str) -> u32 {
-        let current_len = self.words_to_tmpids.len();
-        let word_id = self.words_to_tmpids.entry(word.to_owned()).or_insert(current_len as u32);
-        *word_id
-    }
-
-    pub fn load_word_replacements(&mut self, word_replacements: Vec<WordReplacement>) -> () {
-        for word_replacement in word_replacements {
-            self.get_or_create_tmpid(&word_replacement.from);
-            self.get_or_create_tmpid(&word_replacement.to);
-            self.word_replacements.push(word_replacement);
+    fn get_or_create_tmp_word_id(&mut self, word: &str) -> u32 {
+        let current_len = self.words_to_tmp_word_ids.len();
+        let word_id = self.words_to_tmp_word_ids.entry(word.to_owned()).or_insert(current_len as u32);
+        match self.word_replacement_map.get(word_id) {
+            Some(target_id) => *target_id,
+            _ => *word_id
         }
     }
 
-    pub fn insert<T: AsRef<str>>(&mut self, phrase: &[T]) -> Result<(), Box<Error>> {
+    pub fn load_word_replacements(&mut self, word_replacements: Vec<WordReplacement>) -> Result<(), Box<Error>> {
+        if self.phrases.len() > 0 {
+            return Err(Box::new(IoError::new(IoErrorKind::InvalidData, "Can't load word replacements after phrases are added")));
+        }
+        for word_replacement in word_replacements {
+            let from = self.get_or_create_tmp_word_id(&word_replacement.from);
+            let to = self.get_or_create_tmp_word_id(&word_replacement.to);
+            self.word_replacements.push(word_replacement);
+            self.word_replacement_map.insert(from, to);
+        }
+        Ok(())
+    }
+
+    pub fn insert<T: AsRef<str>>(&mut self, phrase: &[T]) -> Result<u32, Box<Error>> {
         // the strategy here is to take a phrase, look at it word by word, and for any words we've
         // seen before, reuse their temp IDs, otherwise, add new words to our word map and assign them
         // new temp IDs (just autoincrementing in the order we see them) -- later once we've seen all
@@ -99,36 +107,37 @@ impl FuzzyPhraseSetBuilder {
         //
         // and then we're going to add the actual phrase, represented number-wise, to our phrase list
 
-        let mut tmpid_phrase: Vec<u32> = Vec::with_capacity(phrase.len());
+        let mut tmp_word_id_phrase: Vec<u32> = Vec::with_capacity(phrase.len());
         for word in phrase {
             let word = word.as_ref();
             // the fact that this allocation is necessary even if the string is already in the hashmap is a bummer
             // but absent https://github.com/rust-lang/rfcs/pull/1769 , avoiding it requires a huge amount of hoop-jumping
             let string_word = word.to_string();
-            let word_id = self.get_or_create_tmpid(&string_word);
-            tmpid_phrase.push(word_id.to_owned());
+            let word_id = self.get_or_create_tmp_word_id(&string_word);
+            tmp_word_id_phrase.push(word_id.to_owned());
         }
 
-        self.phrases.push(tmpid_phrase);
-        Ok(())
+        let current_phrase_len = self.phrases.len();
+        let phrase_id = self.phrases.entry(tmp_word_id_phrase).or_insert(current_phrase_len as u32);
+        Ok(*phrase_id)
     }
 
     // convenience method that splits the input string on the space character
     // IT DOES NOT DO PROPER TOKENIZATION; if you need that, use a real tokenizer and call
     // insert directly
-    pub fn insert_str(&mut self, phrase: &str) -> Result<(), Box<Error>> {
+    pub fn insert_str(&mut self, phrase: &str) -> Result<u32, Box<Error>> {
         let phrase_v: Vec<&str> = phrase.split(' ').collect();
         self.insert(&phrase_v)
     }
 
-    pub fn finish(mut self) -> Result<(), Box<Error>> {
+    pub fn finish(self) -> Result<Vec<u32>, Box<Error>> {
         // in the future we could make some of this setable from the outside
         let mut metadata = FuzzyPhraseSetMetadata::default();
 
-        // we can go from name -> tmpid
-        // we need to go from tmpid -> id
+        // we can go from name -> tmp_word_id
+        // we need to go from tmp_word_id -> id
         // so build a mapping that does that
-        let mut tmpids_to_ids: Vec<u32> = vec![0; self.words_to_tmpids.len()];
+        let mut tmp_word_ids_to_ids: Vec<u32> = vec![0; self.words_to_tmp_word_ids.len()];
 
         let prefix_writer = BufWriter::new(fs::File::create(self.directory.join(Path::new("prefix.fst")))?);
         let mut prefix_set_builder = PrefixSetBuilder::new(prefix_writer)?;
@@ -146,13 +155,13 @@ impl FuzzyPhraseSetBuilder {
             &unicode_ranges::get_pattern_for_scripts(&allowed_scripts),
         )?;
 
-        // words_to_tmpids is a btreemap over word keys,
+        // words_to_tmp_word_ids is a btreemap over word keys,
         // so when we iterate over it, we'll get back words sorted
         // we'll do three things with that:
         // - build up our prefix set
         // - map from temporary IDs to lex ids (which we can get just be enumerating our sorted list)
         // - build up our fuzzy set (this one doesn't require the sorted words, but it doesn't hurt)
-        for (id, (word, tmpid)) in self.words_to_tmpids.iter().enumerate() {
+        for (id, (word, tmp_word_id)) in self.words_to_tmp_word_ids.iter().enumerate() {
             let id = id as u32;
 
             prefix_set_builder.insert(word)?;
@@ -163,33 +172,30 @@ impl FuzzyPhraseSetBuilder {
                 fuzzy_map_builder.insert(word, id);
             }
 
-            tmpids_to_ids[*tmpid as usize] = id;
+            tmp_word_ids_to_ids[*tmp_word_id as usize] = id;
         }
 
         prefix_set_builder.finish()?;
         fuzzy_map_builder.finish()?;
 
-        // for token-replacement words, we want to map the temporary ID to the final ID of the
-        // replacement target, rather than of the replacement source, so number those again
-        for replacement in &self.word_replacements {
-            tmpids_to_ids[self.words_to_tmpids[&replacement.from] as usize] = tmpids_to_ids[self.words_to_tmpids[&replacement.to] as usize];
-        }
-
+        let mut final_phrases: Vec<(Vec<u32>, u32)> = Vec::new();
         // next, renumber all of the current phrases with real rather than temp IDs
-        for phrase in self.phrases.iter_mut() {
+        for (mut phrase, tmp_phrase_id) in self.phrases.into_iter() {
             for word_idx in (*phrase).iter_mut() {
-                *word_idx = tmpids_to_ids[*word_idx as usize];
+                *word_idx = tmp_word_ids_to_ids[*word_idx as usize];
             }
+            final_phrases.push((phrase, tmp_phrase_id));
         }
 
-        self.phrases.sort();
-        self.phrases.dedup();
+        final_phrases.sort();
 
         let phrase_writer = BufWriter::new(fs::File::create(self.directory.join(Path::new("phrase.fst")))?);
         let mut phrase_set_builder = PhraseSetBuilder::new(phrase_writer)?;
 
-        for phrase in self.phrases {
-            phrase_set_builder.insert(&phrase)?;
+        let mut tmp_phrase_ids_to_ids: Vec<u32> = vec![0; final_phrases.len()];
+        for (id, phrase) in final_phrases.into_iter().enumerate() {
+            phrase_set_builder.insert(&phrase.0)?;
+            tmp_phrase_ids_to_ids[phrase.1 as usize] = id as u32;
         }
 
         phrase_set_builder.finish()?;
@@ -201,7 +207,7 @@ impl FuzzyPhraseSetBuilder {
         let metadata_writer = BufWriter::new(fs::File::create(self.directory.join(Path::new("metadata.json")))?);
         serde_json::to_writer_pretty(metadata_writer, &metadata)?;
 
-        Ok(())
+        Ok(tmp_phrase_ids_to_ids)
     }
 }
 
