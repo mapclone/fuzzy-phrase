@@ -23,13 +23,18 @@ lazy_static! {
     static ref PHRASES: Vec<&'static str> = {
         DATA.trim().split("\n").collect::<Vec<&str>>()
     };
-    static ref SET: FuzzyPhraseSet = {
+    static ref TMP_TO_FINAL: Vec<u32> = {
         let mut builder = FuzzyPhraseSetBuilder::new(&DIR.path()).unwrap();
-        for phrase in PHRASES.iter() {
-            builder.insert_str(phrase).unwrap();
+        for (i, phrase) in PHRASES.iter().enumerate() {
+            let tmp_id = builder.insert_str(phrase).unwrap();
+            // later we're going to assume that the tmp_id a phrase was assigned is the same
+            // as its index in PHRASES, so assert that this is true now
+            assert_eq!(tmp_id, i as u32);
         }
-        builder.finish().unwrap();
-
+        builder.finish().unwrap()
+    };
+    static ref SET: FuzzyPhraseSet = {
+        lazy_static::initialize(&TMP_TO_FINAL);
         FuzzyPhraseSet::from_path(&DIR.path()).unwrap()
     };
 }
@@ -45,13 +50,23 @@ fn glue_fuzztest_build() {
 fn glue_fuzztest_match() {
     let mut rng = rand::thread_rng();
     for _i in 0..500 {
-        let phrase = rng.choose(&PHRASES).unwrap();
+        // per previous, this is both the position of a phrase in PHRASES and the tmp_id it was
+        // assigned when it was inserted, so we can use it to map to the final ID later
+        let phrase_idx = rng.gen_range(0, PHRASES.len());
+        let phrase = PHRASES[phrase_idx];
         let damaged = get_damaged_phrase(phrase, |w| SET.can_fuzzy_match(w) && w.chars().count() > 2);
         let results = SET.fuzzy_match_str(&damaged.as_str(), 1, 1, EndingType::NonPrefix);
 
         assert!(results.is_ok());
         if let Ok(res) = results {
-            assert!(res.iter().filter(|result| itertools::join(&result.phrase, " ").as_str() == *phrase).count() > 0);
+            let matching: Vec<_> = res.iter().filter(
+                |result| itertools::join(&result.phrase, " ").as_str() == phrase
+            ).collect();
+            assert!(matching.len() > 0);
+            let expected_id = TMP_TO_FINAL[phrase_idx];
+            assert!(matching.iter().any(
+                |result| result.phrase_id_range == (expected_id, expected_id)
+            ));
         }
     }
 }
@@ -61,13 +76,23 @@ fn glue_fuzztest_match() {
 fn glue_fuzztest_match_prefix() {
     let mut rng = rand::thread_rng();
     for _i in 0..500 {
-        let phrase = rng.choose(&PHRASES).unwrap();
+        let phrase_idx = rng.gen_range(0, PHRASES.len());
+        let phrase = PHRASES[phrase_idx];
         let damaged = get_damaged_prefix(phrase, |w| SET.can_fuzzy_match(w) && w.chars().count() > 2);
         let results = SET.fuzzy_match_str(&damaged.as_str(), 1, 1, EndingType::AnyPrefix);
 
         assert!(results.is_ok());
         if let Ok(res) = results {
-            assert!(res.iter().filter(|result| phrase.starts_with(itertools::join(&result.phrase, " ").as_str())).count() > 0);
+            let prefix_match_results: Vec<_> = res.iter()
+                .filter(|result| phrase.starts_with(itertools::join(&result.phrase, " ").as_str()))
+                .collect();
+
+            assert!(prefix_match_results.len() > 0);
+
+            let expected_id = TMP_TO_FINAL[phrase_idx];
+            assert!(prefix_match_results.iter().any(|result|
+                expected_id >= result.phrase_id_range.0 && expected_id <= result.phrase_id_range.1
+            ));
         }
 
         let wb_results = SET.fuzzy_match_str(&damaged.as_str(), 1, 1, EndingType::WordBoundaryPrefix);

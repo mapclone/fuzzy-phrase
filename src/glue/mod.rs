@@ -234,7 +234,7 @@ pub struct FuzzyMatchResult {
     pub edit_distance: u8,
     pub phrase: Vec<String>,
     pub ending_type: EndingType,
-    pub phrase_id_range: (u64, u64),
+    pub phrase_id_range: (u32, u32),
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
@@ -243,13 +243,14 @@ pub struct FuzzyWindowResult {
     pub phrase: Vec<String>,
     pub start_position: usize,
     pub ending_type: EndingType,
-    pub phrase_id_range: (u64, u64),
+    pub phrase_id_range: (u32, u32),
 }
 
 impl<'a, 'b> PartialEq<FuzzyMatchResult> for FuzzyWindowResult {
     fn eq(&self, other: &FuzzyMatchResult) -> bool {
         self.edit_distance == other.edit_distance &&
-        self.phrase == other.phrase
+        self.phrase == other.phrase &&
+        self.phrase_id_range == other.phrase_id_range
     }
 }
 
@@ -572,7 +573,7 @@ impl FuzzyPhraseSet {
                         }
                     }
                 },
-                phrase_id_range: (combination.output_range.0.value(), combination.output_range.1.value())
+                phrase_id_range: (combination.output_range.0.value() as u32, combination.output_range.1.value() as u32)
             })
         }
 
@@ -744,7 +745,7 @@ impl FuzzyPhraseSet {
                                 }
                             }
                         },
-                        phrase_id_range: (match_sq.output_range.0.value(), match_sq.output_range.1.value())
+                        phrase_id_range: (match_sq.output_range.0.value() as u32, match_sq.output_range.1.value() as u32)
                     })
                 }
             }
@@ -948,7 +949,7 @@ impl FuzzyPhraseSet {
                                 }
                             }
                         },
-                        phrase_id_range: (match_sq.output_range.0.value(), match_sq.output_range.1.value())
+                        phrase_id_range: (match_sq.output_range.0.value() as u32, match_sq.output_range.1.value() as u32)
                     });
                 }
             }
@@ -967,14 +968,24 @@ mod basic_tests {
 
     lazy_static! {
         static ref DIR: tempfile::TempDir = tempfile::tempdir().unwrap();
-        static ref SET: FuzzyPhraseSet = {
+        static ref PHRASES: Vec<&'static str> = {
+            vec![
+                "100 main street",
+                "200 main street",
+                "100 main ave",
+                "300 mlk blvd"
+            ]
+        };
+        static ref TMP_TO_FINAL: Vec<u32> = {
             let mut builder = FuzzyPhraseSetBuilder::new(&DIR.path()).unwrap();
             builder.insert_str("100 main street").unwrap();
             builder.insert_str("200 main street").unwrap();
             builder.insert_str("100 main ave").unwrap();
             builder.insert_str("300 mlk blvd").unwrap();
-            builder.finish().unwrap();
-
+            builder.finish().unwrap()
+        };
+        static ref SET: FuzzyPhraseSet = {
+            lazy_static::initialize(&TMP_TO_FINAL);
             FuzzyPhraseSet::from_path(&DIR.path()).unwrap()
         };
     }
@@ -1127,6 +1138,16 @@ mod basic_tests {
         );
 
         assert!(SET.fuzzy_match(&["100", "man"], 2, 1, EndingType::AnyPrefix).is_err());
+    }
+
+    #[test]
+    fn glue_fuzzy_match_confirm_ids() {
+        for (i, phrase) in PHRASES.iter().enumerate() {
+            let expected_id = TMP_TO_FINAL[i];
+            let result = SET.fuzzy_match_str(phrase, 0, 0, EndingType::NonPrefix).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!((expected_id, expected_id), result[0].phrase_id_range);
+        }
     }
 
     #[test]

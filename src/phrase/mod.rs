@@ -33,6 +33,7 @@ pub struct PhraseSet(Fst);
 /// | street  | 109821    | [1, 172, 253] |
 ///
 impl PhraseSet {
+    // Find a sequence of words in the phrase graph (either as a complete phrase entry or a prefix)
     pub fn lookup(&self, phrase: &[QueryWord]) -> PhraseSetLookupResult {
         let fst = &self.0;
         let mut node = fst.root();
