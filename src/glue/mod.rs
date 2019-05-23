@@ -54,7 +54,7 @@ impl Default for FuzzyPhraseSetMetadata {
     fn default() -> FuzzyPhraseSetMetadata {
         FuzzyPhraseSetMetadata {
             index_type: "fuzzy_phrase_set".to_string(),
-            format_version: 1,
+            format_version: 2,
             fuzzy_enabled_scripts: vec!["Latin".to_string(), "Greek".to_string(), "Cyrillic".to_string()],
             max_edit_distance: 1,
             word_replacements: vec![]
