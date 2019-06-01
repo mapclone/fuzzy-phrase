@@ -116,6 +116,9 @@ fn contains_query() {
     let prefix = QueryWord::new_prefix((561_528u32, 561_531u32));
     let has_prefix_phrase = [ words[0], words[1], prefix ];
     assert_eq!(false, phrase_set.lookup(&has_prefix_phrase).found_final());
+
+    assert_eq!(&phrase_set.get_by_id(Output::new(2)).unwrap(), &[561_528u32, 1u32, 61_528_u32]);
+    assert!(&phrase_set.get_by_id(Output::new(3)).is_none());
 }
 
 #[test]
@@ -843,4 +846,11 @@ fn sample_prefix_contains_windows_substring() {
         true
     ).unwrap();
     assert_eq!(results, vec![]);
+}
+
+#[test]
+fn sample_get_by_id() {
+    for (id, phrase) in ID_PHRASES.iter().enumerate() {
+        assert_eq!(&SET.get_by_id(Output::new(id as u64)).unwrap(), phrase);
+    }
 }

@@ -8,6 +8,7 @@ use std::path::Path;
 use fst;
 use fst::IntoStreamer;
 use fst::raw::{CompiledAddr, Node, Fst, Builder, Output};
+use byteorder::{BigEndian, ReadBytesExt};
 
 use self::util::{word_ids_to_key};
 use self::util::PhraseSetError;
@@ -410,6 +411,65 @@ impl PhraseSet {
             }
         }
         Ok(())
+    }
+
+    /// Go from ID to set of word IDs, rather than the other way around. The approach is to start
+    /// with the sought ID and subtract as we go, until we get to zero, at which point we wait
+    /// until we hit a final state and then return. At each juncture, we're looking for the
+    /// transition with the largest output that's still smaller than what we have left in our
+    /// target ID
+    pub fn get_by_id(&self, mut id: Output) -> Option<Vec<u32>> {
+        let fst = &self.0;
+        let mut node = fst.root();
+
+        let mut word_id: Vec<u8> = Vec::with_capacity(4);
+        word_id.push(0);
+
+        let mut out: Vec<u32> = Vec::new();
+
+        loop {
+            let mut next_node: Option<_> = None;
+            {
+                let mut transitions = node.transitions().peekable();
+                while let Some(current) = transitions.next() {
+                    let found = match transitions.peek() {
+                        // if the next one is too big, or we're on the last one, go with the
+                        // current transition
+                        Some(next) => next.out > id,
+                        None => true,
+                    };
+                    if found {
+                        if current.out > id {
+                            return None;
+                        }
+
+                        id = id.sub(current.out);
+                        word_id.push(current.inp);
+
+                        if word_id.len() == 4 {
+                            // this only fails if the slice isn't four bytes long, but it is ^
+                            // so unwrap is safe
+                            let word = (&word_id[..]).read_u32::<BigEndian>().unwrap();
+                            out.push(word);
+                            word_id.truncate(1);
+                        }
+
+                        let nn = fst.node(current.addr);
+                        if id.value() == 0 && nn.is_final() {
+                            return Some(out);
+                        } else {
+                            next_node = Some(nn);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            match next_node {
+                Some(n) => node = n,
+                None => return None,
+            }
+        }
     }
 
     /// This function takes a given position in the graph, and checks to see if any words reachable
