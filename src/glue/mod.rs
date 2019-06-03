@@ -9,6 +9,7 @@ use std::fmt::Debug;
 
 use serde_json;
 use fst::Streamer;
+use fst::raw::Output;
 use rustc_hash::FxHashMap;
 
 use ::prefix::{PrefixSet, PrefixSetBuilder};
@@ -957,6 +958,16 @@ impl FuzzyPhraseSet {
 
         Ok(results)
     }
+
+    /// Given a phrase ID, this function returns the words in the phrase
+    pub fn get_by_phrase_id(&self, id: u32) -> Result<Option<Vec<String>>, Box<dyn Error>> {
+        match self.phrase_set.get_by_id(Output::new(id as u64)) {
+            Some(word_ids) => {
+                Ok(Some(word_ids.iter().map(|id| self.word_list[*id as usize].clone()).collect()))
+            },
+            None => Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1217,6 +1228,17 @@ mod basic_tests {
                 vec![FuzzyMatchResult { phrase: vec!["300".to_string(), "mlk".to_string(), "blvd".to_string()], edit_distance: 0, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }]
             ]
         );
+    }
+
+    #[test]
+    fn get_by_id() {
+        let mut phrases = PHRASES.clone();
+        phrases.sort();
+        for (i, phrase) in phrases.iter().enumerate() {
+            let split: Vec<_> = phrase.split(" ").map(|w| w.to_owned()).collect();
+            assert_eq!(split, SET.get_by_phrase_id(i as u32).unwrap().unwrap());
+        }
+        assert!(SET.get_by_phrase_id(PHRASES.len() as u32).unwrap().is_none());
     }
 
     lazy_static! {
