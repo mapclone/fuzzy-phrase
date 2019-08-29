@@ -541,7 +541,7 @@ impl PhraseSet {
                 let t2 = node2.transition(i2);
 
                 // we've got three bytes! woohoo!
-                let mut next_after_min = [t0.inp, t1.inp, t2.inp];
+                let next_after_min = [t0.inp, t1.inp, t2.inp];
 
                 if next_after_min <= sought_max_key {
                     // we found the first triple after the minimum,
@@ -682,6 +682,22 @@ impl PhraseSet {
                 }
             }
         }
+    }
+
+    pub fn as_fst(&self) -> &Fst {
+        &self.0
+    }
+
+    pub fn get_max_id(&self) -> Output {
+        // chase the maximum ID down the phrase tree
+        let mut max_node: Node = self.0.root();
+        let mut max_output: Output = Output::new(0);
+        while max_node.len() != 0 {
+            let t = max_node.transition(max_node.len() - 1);
+            max_output = max_output.cat(t.out);
+            max_node = self.0.node(t.addr);
+        }
+        max_output.cat(max_node.final_output())
     }
 
     /// Create from a raw byte sequence, which must be written by `PhraseSetBuilder`.

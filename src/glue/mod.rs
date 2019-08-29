@@ -10,6 +10,7 @@ use std::fmt::Debug;
 use serde_json;
 use fst::Streamer;
 use fst::raw::Output;
+use regex;
 use rustc_hash::FxHashMap;
 
 use ::prefix::{PrefixSet, PrefixSetBuilder};
@@ -17,13 +18,13 @@ use ::phrase::{PhraseSet, PhraseSetBuilder};
 use ::phrase::util::PhraseSetError;
 use ::phrase::query::QueryWord;
 use ::fuzzy::{FuzzyMap, FuzzyMapBuilder};
-use regex;
 
 use std::{str, fmt};
 #[macro_use] mod enum_number;
 
 pub mod unicode_ranges;
 mod util;
+mod bins;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WordReplacement {
@@ -712,7 +713,7 @@ impl FuzzyPhraseSet {
         let mut results: Vec<FuzzyWindowResult> = Vec::new();
         for chunk in subqueries.iter() {
             for i in 0..chunk.word_possibilities.len() {
-                let mut phrase_matches = self.phrase_set.match_combinations_as_windows(
+                let phrase_matches = self.phrase_set.match_combinations_as_windows(
                     &chunk.word_possibilities[i..],
                     max_phrase_dist,
                     match chunk.ending_type {
@@ -967,6 +968,15 @@ impl FuzzyPhraseSet {
             },
             None => Ok(None)
         }
+    }
+
+    pub fn get_prefix_bins(&self, max_bin_size: usize) -> Result<Vec<bins::PrefixBin>, Box<dyn Error>> {
+        let max_id = self.phrase_set.get_max_id();
+        let fst = self.phrase_set.as_fst();
+
+        let bins = bins::subdivide_word(fst, &fst.root(), Output::new(0), max_id, max_bin_size, &self.word_list);
+
+        Ok(bins.into_iter().map(|group| group.prefix_bin).collect())
     }
 }
 
