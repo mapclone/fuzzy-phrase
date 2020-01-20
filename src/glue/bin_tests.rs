@@ -82,7 +82,7 @@ fn range_for_prefix(prefix: &str) -> Option<PrefixBin> {
         }
     }
     bounds.map(|(first, last)| PrefixBin {
-        prefix: prefix.to_string(),
+        prefix: prefix.trim().to_string(),
         first: Output::new(first as u64),
         last: Output::new(last as u64),
         size: last - first + 1
@@ -105,6 +105,36 @@ fn simple_division() {
         vec![
             range_for_prefix("r").unwrap(),
             range_for_prefix("sa").unwrap(),
+            range_for_prefix("sc").unwrap(),
+            range_for_prefix("se").unwrap(),
+            range_for_prefix("sh").unwrap(),
+            range_for_prefix("si").unwrap(),
+            range_for_prefix("so").unwrap(),
+            range_for_prefix("sp").unwrap(),
+            range_for_prefix("st").unwrap(),
+            range_for_prefix("su").unwrap(),
+            range_for_prefix("sy").unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn reach_word_boundaries() {
+    // r's get split, some s's get further split, and the san's cross the word boundary
+    assert_eq!(
+        SET.get_prefix_bins(7).unwrap(),
+        vec![
+            range_for_prefix("ra").unwrap(),
+            range_for_prefix("re").unwrap(),
+            range_for_prefix("ri").unwrap(),
+            range_for_prefix("ro").unwrap(),
+            range_for_prefix("sac").unwrap(),
+            range_for_prefix("sai").unwrap(),
+            range_for_prefix("sal").unwrap(),
+            range_for_prefix("san ").unwrap(),
+            range_for_prefix("sand").unwrap(),
+            range_for_prefix("sant").unwrap(),
+            range_for_prefix("sav").unwrap(),
             range_for_prefix("sc").unwrap(),
             range_for_prefix("se").unwrap(),
             range_for_prefix("sh").unwrap(),
