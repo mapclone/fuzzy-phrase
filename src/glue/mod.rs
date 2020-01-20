@@ -1374,4 +1374,5 @@ mod basic_tests {
 }
 
 #[cfg(test)] mod replacement_tests;
+#[cfg(test)] mod bin_tests;
 #[cfg(test)] mod fuzz_tests;

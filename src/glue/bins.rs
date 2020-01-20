@@ -3,7 +3,7 @@ use fst::raw::{Fst, Node, Output};
 
 use ::phrase::util::three_byte_decode;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixBin {
     pub prefix: String,
     pub first: Output,
