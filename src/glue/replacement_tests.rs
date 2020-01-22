@@ -15,7 +15,7 @@ lazy_static! {
     static ref TEST_SET: FuzzyPhraseSet = {
         let mut builder = FuzzyPhraseSetBuilder::new(&DIRECTORY.path()).unwrap();
 
-        builder.load_word_replacements(REPLACEMENTS.clone());
+        builder.load_word_replacements(REPLACEMENTS.clone()).unwrap();
 
         builder.insert_str("100 main street").unwrap();
         builder.insert_str("100 main st").unwrap();
@@ -247,15 +247,15 @@ fn fuzzy_match() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main st", 1, 1, EndingType::NonPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
     // match to "100 main st" by fuzzy-matching, at distance 1
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main str", 1, 1, EndingType::NonPrefix).unwrap(),
-        vec![FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix }]
+        vec![FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix, phrase_id_range: (2, 2) }]
     );
 
     // don't match anything if fuzzy search is disabled
@@ -273,7 +273,7 @@ fn fuzzy_match() {
     // match to "100 main street" by fuzzy-matching and then token-replace to "100 main st" at distance 1
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main stree", 1, 1, EndingType::NonPrefix).unwrap(),
-        vec![FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix }]
+        vec![FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix, phrase_id_range: (2, 2) }]
     );
 
     // exact-match to 100 main street and then replace, so match at edit distance 0
@@ -281,8 +281,8 @@ fn fuzzy_match() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main street", 1, 1, EndingType::NonPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::NonPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
@@ -291,7 +291,7 @@ fn fuzzy_match() {
         assert_eq!(
             TEST_SET.fuzzy_match_str(variant, 1, 1, EndingType::NonPrefix).unwrap(),
             vec![
-                FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()], ending_type: EndingType::NonPrefix }
+                FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()], ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) }
             ]
         )
     }
@@ -304,8 +304,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main s", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "s".to_string()], ending_type: EndingType::AnyPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "s".to_string()], ending_type: EndingType::AnyPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "s".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "s".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
@@ -314,8 +314,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main st", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::AnyPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::AnyPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
@@ -323,8 +323,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main str", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
@@ -332,7 +332,7 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main str", 0, 0, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix },
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (2, 2) },
         ]
     );
 
@@ -340,8 +340,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main stre", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
@@ -349,8 +349,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main stree", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
@@ -359,8 +359,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 main street", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (2, 2) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "maine".to_string(), "st".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }
         ]
     );
 
@@ -369,7 +369,7 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 f", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "f".to_string()], ending_type: EndingType::AnyPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "f".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (0, 1) }
         ]
     );
 
@@ -378,8 +378,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 fo", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "fo".to_string()], ending_type: EndingType::AnyPrefix },
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "fo".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (0, 0) },
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
         ]
     );
 
@@ -388,7 +388,7 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 fo", 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
         ]
     );
 
@@ -399,7 +399,7 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 frt", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
         ]
     );
 
@@ -407,8 +407,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 fort", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "fort".to_string()], ending_type: EndingType::AnyPrefix },
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "fort".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (0, 0) },
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
         ]
     );
 
@@ -416,7 +416,7 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 fort", 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
         ]
     );
 
@@ -424,8 +424,8 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 forte", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "forte".to_string()], ending_type: EndingType::AnyPrefix },
-            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "forte".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (0, 0) },
+            FuzzyMatchResult { edit_distance: 1, phrase: vec!["100".to_string(), "ft".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
         ]
     );
 
@@ -433,7 +433,7 @@ fn fuzzy_match_prefix() {
     assert_eq!(
         TEST_SET.fuzzy_match_str("100 forten", 1, 1, EndingType::AnyPrefix).unwrap(),
         vec![
-            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "forten".to_string()], ending_type: EndingType::AnyPrefix },
+            FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "forten".to_string()], ending_type: EndingType::AnyPrefix, phrase_id_range: (0, 0) },
         ]
     );
 
@@ -455,7 +455,7 @@ fn fuzzy_match_prefix() {
         assert_eq!(
             TEST_SET.fuzzy_match_str(variant.0, 1, 1, EndingType::AnyPrefix).unwrap(),
             vec![
-                FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+                FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
             ]
         );
         // disable fuzzy matching so that we don't match road that way
@@ -463,7 +463,7 @@ fn fuzzy_match_prefix() {
             TEST_SET.fuzzy_match_str(variant.0, 0, 0, EndingType::WordBoundaryPrefix).unwrap(),
             if variant.1 {
                 vec![
-                    FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()], ending_type: EndingType::WordBoundaryPrefix }
+                    FuzzyMatchResult { edit_distance: 0, phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()], ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }
                 ]
             } else {
                 Vec::<FuzzyMatchResult>::new()
@@ -494,14 +494,16 @@ fn fuzzy_match_windows() -> () {
                     edit_distance: 0,
                     phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()],
                     start_position: 0,
-                    ending_type: EndingType::WordBoundaryPrefix
+                    ending_type: EndingType::WordBoundaryPrefix,
+                    phrase_id_range: (1, 1)
                 }
             } else {
                 FuzzyWindowResult {
                     edit_distance: 0,
                     phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "r".to_string()],
                     start_position: 0,
-                    ending_type: EndingType::AnyPrefix
+                    ending_type: EndingType::AnyPrefix,
+                    phrase_id_range: (1, 1)
                 }
             }]
         );
@@ -513,7 +515,8 @@ fn fuzzy_match_windows() -> () {
                         edit_distance: variant.2,
                         phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()],
                         start_position: 0,
-                        ending_type: EndingType::WordBoundaryPrefix
+                        ending_type: EndingType::WordBoundaryPrefix,
+                        phrase_id_range: (1, 1)
                     }
                 ]
             } else {
@@ -535,7 +538,8 @@ fn fuzzy_match_windows() -> () {
                     edit_distance: 0,
                     phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()],
                     start_position: 0,
-                    ending_type: EndingType::NonPrefix
+                    ending_type: EndingType::NonPrefix,
+                    phrase_id_range: (1, 1)
                 }
             ]
         )
@@ -554,7 +558,8 @@ fn fuzzy_match_windows() -> () {
                     edit_distance: 0,
                     phrase: vec!["100".to_string(), "ft".to_string(), "wayne".to_string(), "rd".to_string()],
                     start_position: 2,
-                    ending_type: EndingType::WordBoundaryPrefix
+                    ending_type: EndingType::WordBoundaryPrefix,
+                    phrase_id_range: (1, 1)
                 }
             ]
         )
@@ -568,13 +573,15 @@ fn fuzzy_match_windows() -> () {
                 edit_distance: 0,
                 phrase: vec!["100".to_string(), "fo".to_string()],
                 start_position: 2,
-                ending_type: EndingType::AnyPrefix
+                ending_type: EndingType::AnyPrefix,
+                phrase_id_range: (0, 0)
             },
             FuzzyWindowResult {
                 edit_distance: 0,
                 phrase: vec!["100".to_string(), "ft".to_string()],
                 start_position: 2,
-                ending_type: EndingType::WordBoundaryPrefix
+                ending_type: EndingType::WordBoundaryPrefix,
+                phrase_id_range: (1, 1)
             }
         ]
     );
@@ -587,7 +594,8 @@ fn fuzzy_match_windows() -> () {
                 edit_distance: 1,
                 phrase: vec!["100".to_string(), "ft".to_string()],
                 start_position: 2,
-                ending_type: EndingType::WordBoundaryPrefix
+                ending_type: EndingType::WordBoundaryPrefix,
+                phrase_id_range: (1, 1)
             }
         ]
     );

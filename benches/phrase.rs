@@ -6,7 +6,7 @@ use std::env;
 use rand::{thread_rng, Rng};
 use criterion::{Criterion, Fun, Bencher};
 use fuzzy_phrase::{PhraseSet, PhraseSetBuilder};
-use fuzzy_phrase::phrase::query::{QueryWord, QueryPhrase};
+use fuzzy_phrase::phrase::query::QueryWord;
 
 fn tokenize(s: &str) -> Vec<String> {
     s.split(" ").map(|w| w.to_lowercase()).collect()
@@ -185,9 +185,8 @@ pub fn benchmark(c: &mut Criterion) {
         // the closure based to b.iter is the thing that will actually be timed; everything before
         // that is untimed per-benchmark setup
         b.iter(|| {
-            let query_words = cycle.next().unwrap();
-            let query_phrase = QueryPhrase::new(&query_words).unwrap();
-            let _result = data.phrase_set.contains(query_phrase).unwrap();
+            let query_phrase = cycle.next().unwrap();
+            let _result = data.phrase_set.lookup(&query_phrase).found_final();
         });
     }));
 
@@ -198,9 +197,8 @@ pub fn benchmark(c: &mut Criterion) {
         let mut cycle = data.sample_full.iter().cycle();
 
         b.iter(|| {
-            let query_words = cycle.next().unwrap();
-            let query_phrase = QueryPhrase::new(&query_words).unwrap();
-            let _result = data.phrase_set.contains_prefix(query_phrase).unwrap();
+            let query_phrase = cycle.next().unwrap();
+            let _result = data.phrase_set.lookup(&query_phrase).found();
         });
     }));
 
@@ -211,22 +209,8 @@ pub fn benchmark(c: &mut Criterion) {
         let mut cycle = data.sample_prefix.iter().cycle();
 
         b.iter(|| {
-            let query_words = cycle.next().unwrap();
-            let query_phrase = QueryPhrase::new(&query_words).unwrap();
-            let _result = data.phrase_set.contains_prefix(query_phrase).unwrap();
-        });
-    }));
-
-    // data is shadowed here for ease of copying and pasting, but this is a new clone
-    // (again, same data, new reference, because it's an Rc)
-    let data = shared_data.clone();
-    to_bench.push(Fun::new("range_fst_range", move |b: &mut Bencher, _i| {
-        let mut cycle = data.sample_prefix.iter().cycle();
-
-        b.iter(|| {
-            let query_words = cycle.next().unwrap();
-            let query_phrase = QueryPhrase::new(&query_words).unwrap();
-            let _result = data.phrase_set.range(query_phrase).unwrap();
+            let query_phrase = cycle.next().unwrap();
+            let _result = data.phrase_set.lookup(&query_phrase).found();
         });
     }));
 
