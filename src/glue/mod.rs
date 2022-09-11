@@ -9,17 +9,22 @@ use std::fmt::Debug;
 
 use serde_json;
 use fst::Streamer;
+use fst::raw::Output;
+use regex;
 use rustc_hash::FxHashMap;
 
 use ::prefix::{PrefixSet, PrefixSetBuilder};
 use ::phrase::{PhraseSet, PhraseSetBuilder};
 use ::phrase::util::PhraseSetError;
-use ::phrase::query::{QueryPhrase, QueryWord};
+use ::phrase::query::QueryWord;
 use ::fuzzy::{FuzzyMap, FuzzyMapBuilder};
-use regex;
+
+use std::{str, fmt};
+#[macro_use] mod enum_number;
 
 pub mod unicode_ranges;
 mod util;
+mod bins;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct WordReplacement {
@@ -29,12 +34,12 @@ pub struct WordReplacement {
 
 #[derive(Default, Debug)]
 pub struct FuzzyPhraseSetBuilder {
-    phrases: Vec<Vec<u32>>,
-    // use a btreemap for this one so we can read them out in order later
-    // we'll only have one copy of each word, in the vector, so the inverse
-    // map will map from a pointer to an int
-    words_to_tmpids: BTreeMap<String, u32>,
+    // order doesn't matter for this one because we'll renumber it anyway
+    phrases: FxHashMap<Vec<u32>, u32>,
+    // use a btreemaps for this one so we can read them out in order later
+    words_to_tmp_word_ids: BTreeMap<String, u32>,
     word_replacements: Vec<WordReplacement>,
+    word_replacement_map: FxHashMap<u32, u32>,
     directory: PathBuf,
 }
 
@@ -51,7 +56,7 @@ impl Default for FuzzyPhraseSetMetadata {
     fn default() -> FuzzyPhraseSetMetadata {
         FuzzyPhraseSetMetadata {
             index_type: "fuzzy_phrase_set".to_string(),
-            format_version: 1,
+            format_version: 2,
             fuzzy_enabled_scripts: vec!["Latin".to_string(), "Greek".to_string(), "Cyrillic".to_string()],
             max_edit_distance: 1,
             word_replacements: vec![]
@@ -74,21 +79,29 @@ impl FuzzyPhraseSetBuilder {
         Ok(FuzzyPhraseSetBuilder { directory, ..Default::default() })
     }
 
-    fn get_or_create_tmpid(&mut self, word: &str) -> u32 {
-        let current_len = self.words_to_tmpids.len();
-        let word_id = self.words_to_tmpids.entry(word.to_owned()).or_insert(current_len as u32);
-        *word_id
-    }
-
-    pub fn load_word_replacements(&mut self, word_replacements: Vec<WordReplacement>) -> () {
-        for word_replacement in word_replacements {
-            self.get_or_create_tmpid(&word_replacement.from);
-            self.get_or_create_tmpid(&word_replacement.to);
-            self.word_replacements.push(word_replacement);
+    fn get_or_create_tmp_word_id(&mut self, word: &str) -> u32 {
+        let current_len = self.words_to_tmp_word_ids.len();
+        let word_id = self.words_to_tmp_word_ids.entry(word.to_owned()).or_insert(current_len as u32);
+        match self.word_replacement_map.get(word_id) {
+            Some(target_id) => *target_id,
+            _ => *word_id
         }
     }
 
-    pub fn insert<T: AsRef<str>>(&mut self, phrase: &[T]) -> Result<(), Box<Error>> {
+    pub fn load_word_replacements(&mut self, word_replacements: Vec<WordReplacement>) -> Result<(), Box<Error>> {
+        if self.phrases.len() > 0 {
+            return Err(Box::new(IoError::new(IoErrorKind::InvalidData, "Can't load word replacements after phrases are added")));
+        }
+        for word_replacement in word_replacements {
+            let from = self.get_or_create_tmp_word_id(&word_replacement.from);
+            let to = self.get_or_create_tmp_word_id(&word_replacement.to);
+            self.word_replacements.push(word_replacement);
+            self.word_replacement_map.insert(from, to);
+        }
+        Ok(())
+    }
+
+    pub fn insert<T: AsRef<str>>(&mut self, phrase: &[T]) -> Result<u32, Box<Error>> {
         // the strategy here is to take a phrase, look at it word by word, and for any words we've
         // seen before, reuse their temp IDs, otherwise, add new words to our word map and assign them
         // new temp IDs (just autoincrementing in the order we see them) -- later once we've seen all
@@ -96,36 +109,37 @@ impl FuzzyPhraseSetBuilder {
         //
         // and then we're going to add the actual phrase, represented number-wise, to our phrase list
 
-        let mut tmpid_phrase: Vec<u32> = Vec::with_capacity(phrase.len());
+        let mut tmp_word_id_phrase: Vec<u32> = Vec::with_capacity(phrase.len());
         for word in phrase {
             let word = word.as_ref();
             // the fact that this allocation is necessary even if the string is already in the hashmap is a bummer
             // but absent https://github.com/rust-lang/rfcs/pull/1769 , avoiding it requires a huge amount of hoop-jumping
             let string_word = word.to_string();
-            let word_id = self.get_or_create_tmpid(&string_word);
-            tmpid_phrase.push(word_id.to_owned());
+            let word_id = self.get_or_create_tmp_word_id(&string_word);
+            tmp_word_id_phrase.push(word_id.to_owned());
         }
 
-        self.phrases.push(tmpid_phrase);
-        Ok(())
+        let current_phrase_len = self.phrases.len();
+        let phrase_id = self.phrases.entry(tmp_word_id_phrase).or_insert(current_phrase_len as u32);
+        Ok(*phrase_id)
     }
 
     // convenience method that splits the input string on the space character
     // IT DOES NOT DO PROPER TOKENIZATION; if you need that, use a real tokenizer and call
     // insert directly
-    pub fn insert_str(&mut self, phrase: &str) -> Result<(), Box<Error>> {
+    pub fn insert_str(&mut self, phrase: &str) -> Result<u32, Box<Error>> {
         let phrase_v: Vec<&str> = phrase.split(' ').collect();
         self.insert(&phrase_v)
     }
 
-    pub fn finish(mut self) -> Result<(), Box<Error>> {
+    pub fn finish(self) -> Result<Vec<u32>, Box<Error>> {
         // in the future we could make some of this setable from the outside
         let mut metadata = FuzzyPhraseSetMetadata::default();
 
-        // we can go from name -> tmpid
-        // we need to go from tmpid -> id
+        // we can go from name -> tmp_word_id
+        // we need to go from tmp_word_id -> id
         // so build a mapping that does that
-        let mut tmpids_to_ids: Vec<u32> = vec![0; self.words_to_tmpids.len()];
+        let mut tmp_word_ids_to_ids: Vec<u32> = vec![0; self.words_to_tmp_word_ids.len()];
 
         let prefix_writer = BufWriter::new(fs::File::create(self.directory.join(Path::new("prefix.fst")))?);
         let mut prefix_set_builder = PrefixSetBuilder::new(prefix_writer)?;
@@ -143,13 +157,13 @@ impl FuzzyPhraseSetBuilder {
             &unicode_ranges::get_pattern_for_scripts(&allowed_scripts),
         )?;
 
-        // words_to_tmpids is a btreemap over word keys,
+        // words_to_tmp_word_ids is a btreemap over word keys,
         // so when we iterate over it, we'll get back words sorted
         // we'll do three things with that:
         // - build up our prefix set
         // - map from temporary IDs to lex ids (which we can get just be enumerating our sorted list)
         // - build up our fuzzy set (this one doesn't require the sorted words, but it doesn't hurt)
-        for (id, (word, tmpid)) in self.words_to_tmpids.iter().enumerate() {
+        for (id, (word, tmp_word_id)) in self.words_to_tmp_word_ids.iter().enumerate() {
             let id = id as u32;
 
             prefix_set_builder.insert(word)?;
@@ -160,32 +174,30 @@ impl FuzzyPhraseSetBuilder {
                 fuzzy_map_builder.insert(word, id);
             }
 
-            tmpids_to_ids[*tmpid as usize] = id;
+            tmp_word_ids_to_ids[*tmp_word_id as usize] = id;
         }
 
         prefix_set_builder.finish()?;
         fuzzy_map_builder.finish()?;
 
-        // for token-replacement words, we want to map the temporary ID to the final ID of the
-        // replacement target, rather than of the replacement source, so number those again
-        for replacement in &self.word_replacements {
-            tmpids_to_ids[self.words_to_tmpids[&replacement.from] as usize] = tmpids_to_ids[self.words_to_tmpids[&replacement.to] as usize];
-        }
-
+        let mut final_phrases: Vec<(Vec<u32>, u32)> = Vec::new();
         // next, renumber all of the current phrases with real rather than temp IDs
-        for phrase in self.phrases.iter_mut() {
+        for (mut phrase, tmp_phrase_id) in self.phrases.into_iter() {
             for word_idx in (*phrase).iter_mut() {
-                *word_idx = tmpids_to_ids[*word_idx as usize];
+                *word_idx = tmp_word_ids_to_ids[*word_idx as usize];
             }
+            final_phrases.push((phrase, tmp_phrase_id));
         }
 
-        self.phrases.sort();
+        final_phrases.sort();
 
         let phrase_writer = BufWriter::new(fs::File::create(self.directory.join(Path::new("phrase.fst")))?);
         let mut phrase_set_builder = PhraseSetBuilder::new(phrase_writer)?;
 
-        for phrase in self.phrases {
-            phrase_set_builder.insert(&phrase)?;
+        let mut tmp_phrase_ids_to_ids: Vec<u32> = vec![0; final_phrases.len()];
+        for (id, phrase) in final_phrases.into_iter().enumerate() {
+            phrase_set_builder.insert(&phrase.0)?;
+            tmp_phrase_ids_to_ids[phrase.1 as usize] = id as u32;
         }
 
         phrase_set_builder.finish()?;
@@ -197,7 +209,7 @@ impl FuzzyPhraseSetBuilder {
         let metadata_writer = BufWriter::new(fs::File::create(self.directory.join(Path::new("metadata.json")))?);
         serde_json::to_writer_pretty(metadata_writer, &metadata)?;
 
-        Ok(())
+        Ok(tmp_phrase_ids_to_ids)
     }
 }
 
@@ -211,10 +223,20 @@ pub struct FuzzyPhraseSet {
     max_edit_distance: u8,
 }
 
+enum_number! {
+    EndingType {
+        NonPrefix = 0,
+        AnyPrefix = 1,
+        WordBoundaryPrefix = 2,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
 pub struct FuzzyMatchResult {
     pub edit_distance: u8,
     pub phrase: Vec<String>,
+    pub ending_type: EndingType,
+    pub phrase_id_range: (u32, u32),
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
@@ -222,13 +244,15 @@ pub struct FuzzyWindowResult {
     pub edit_distance: u8,
     pub phrase: Vec<String>,
     pub start_position: usize,
-    pub ends_in_prefix: bool,
+    pub ending_type: EndingType,
+    pub phrase_id_range: (u32, u32),
 }
 
 impl<'a, 'b> PartialEq<FuzzyMatchResult> for FuzzyWindowResult {
     fn eq(&self, other: &FuzzyMatchResult) -> bool {
         self.edit_distance == other.edit_distance &&
-        self.phrase == other.phrase
+        self.phrase == other.phrase &&
+        self.phrase_id_range == other.phrase_id_range
     }
 }
 
@@ -311,68 +335,66 @@ impl FuzzyPhraseSet {
         util::can_fuzzy_match(word, &self.script_regex)
     }
 
-    pub fn contains<T: AsRef<str>>(&self, phrase: &[T]) -> Result<bool, Box<Error>> {
-        // strategy: get each word's ID from the prefix graph (or return false if any are missing)
-        // and then look up that ID sequence in the phrase graph
-        let mut id_phrase: Vec<QueryWord> = Vec::with_capacity(phrase.len());
-        for word in phrase {
-            match self.prefix_set.lookup(word.as_ref()).id() {
-                Some(word_id) => {
-                    let id = word_id.value() as u32;
-                    let maybe_replaced = *self.word_replacement_map.get(&id).unwrap_or(&id);
-                    id_phrase.push(QueryWord::new_full(maybe_replaced, 0))
-                },
-                None => { return Ok(false) }
+    pub fn contains<T: AsRef<str>>(&self, phrase: &[T], ending_type: EndingType) -> Result<bool, Box<Error>> {
+        match ending_type {
+            EndingType::NonPrefix | EndingType::WordBoundaryPrefix => {
+                // strategy: get each word's ID from the prefix graph (or return false if any are missing)
+                // and then look up that ID sequence in the phrase graph
+                let mut id_phrase: Vec<QueryWord> = Vec::with_capacity(phrase.len());
+                for word in phrase {
+                    match self.prefix_set.lookup(word.as_ref()).id() {
+                        Some(word_id) => {
+                            let id = word_id.value() as u32;
+                            let maybe_replaced = *self.word_replacement_map.get(&id).unwrap_or(&id);
+                            id_phrase.push(QueryWord::new_full(maybe_replaced, 0))
+                        },
+                        None => { return Ok(false) }
+                    }
+                }
+                Ok(match ending_type {
+                    EndingType::NonPrefix => self.phrase_set.lookup(&id_phrase).found_final(),
+                    _ => self.phrase_set.lookup(&id_phrase).found()
+                })
+            },
+            _ => {
+                // strategy: because of token replacement, the terminal word might have more than one
+                // possible word ID if the prefix range contains replaceable words; as such, rather
+                // than using PhraseSet's contains operation, we'll use the multi-path combination
+                // matcher as we do with fuzzy_match, but with a much-constrained search set
+                let mut word_possibilities: Vec<Vec<QueryWord>> = Vec::with_capacity(phrase.len());
+
+                if phrase.len() == 0 {
+                    return Ok(false);
+                }
+
+                let last_idx = phrase.len() - 1;
+                for word in phrase[..last_idx].iter() {
+                    match self.prefix_set.lookup(word.as_ref()).id() {
+                        Some(word_id) => {
+                            let id = word_id.value() as u32;
+                            let maybe_replaced = *self.word_replacement_map.get(&id).unwrap_or(&id);
+                            word_possibilities.push(vec![QueryWord::new_full(maybe_replaced, 0)])
+                        },
+                        None => { return Ok(false) }
+                    }
+                }
+                match self.get_terminal_word_possibilities(phrase[last_idx].as_ref(), 0)? {
+                    Some(possibilities) => word_possibilities.push(possibilities),
+                    None => return Ok(false),
+                }
+
+                let phrase_matches = self.phrase_set.match_combinations_as_prefixes(&word_possibilities, 0)?;
+                Ok(phrase_matches.len() > 0)
             }
         }
-        Ok(self.phrase_set.contains(QueryPhrase::new(&id_phrase)?)?)
     }
 
     // convenience method that splits the input string on the space character
     // IT DOES NOT DO PROPER TOKENIZATION; if you need that, use a real tokenizer and call
     // contains directly
-    pub fn contains_str(&self, phrase: &str) -> Result<bool, Box<Error>> {
+    pub fn contains_str(&self, phrase: &str, ending_type: EndingType) -> Result<bool, Box<Error>> {
         let phrase_v: Vec<&str> = phrase.split(' ').collect();
-        self.contains(&phrase_v)
-    }
-
-    pub fn contains_prefix<T: AsRef<str>>(&self, phrase: &[T]) -> Result<bool, Box<Error>> {
-        // strategy: because of token replacement, the terminal word might have more than one
-        // possible word ID if the prefix range contains replaceable words; as such, rather
-        // than using PhraseSet's contains operation, we'll use the multi-path combination
-        // matcher as we do with fuzzy_match_prefix, but with a much-constrained search set
-        let mut word_possibilities: Vec<Vec<QueryWord>> = Vec::with_capacity(phrase.len());
-
-        if phrase.len() == 0 {
-            return Ok(false);
-        }
-
-        let last_idx = phrase.len() - 1;
-        for word in phrase[..last_idx].iter() {
-            match self.prefix_set.lookup(word.as_ref()).id() {
-                Some(word_id) => {
-                    let id = word_id.value() as u32;
-                    let maybe_replaced = *self.word_replacement_map.get(&id).unwrap_or(&id);
-                    word_possibilities.push(vec![QueryWord::new_full(maybe_replaced, 0)])
-                },
-                None => { return Ok(false) }
-            }
-        }
-        match self.get_terminal_word_possibilities(phrase[last_idx].as_ref(), 0)? {
-            Some(possibilities) => word_possibilities.push(possibilities),
-            None => return Ok(false),
-        }
-
-        let phrase_matches = self.phrase_set.match_combinations_as_prefixes(&word_possibilities, 0)?;
-        Ok(phrase_matches.len() > 0)
-    }
-
-    // convenience method that splits the input string on the space character
-    // IT DOES NOT DO PROPER TOKENIZATION; if you need that, use a real tokenizer and call
-    // contains_prefix directly
-    pub fn contains_prefix_str(&self, phrase: &str) -> Result<bool, Box<Error>> {
-        let phrase_v: Vec<&str> = phrase.split(' ').collect();
-        self.contains_prefix(&phrase_v)
+        self.contains(&phrase_v, ending_type)
     }
 
     #[inline(always)]
@@ -458,7 +480,7 @@ impl FuzzyPhraseSet {
                 // replacement result; otherwise insert it into the set and push it to the output list
                 let already = last_variants.iter().any(|&x| match x {
                     QueryWord::Full { id, .. } => id == maybe_replaced,
-                    QueryWord::Prefix { id_range, .. } => maybe_replaced >= id_range.0 && maybe_replaced <= id_range.1 
+                    QueryWord::Prefix { id_range, .. } => maybe_replaced >= id_range.0 && maybe_replaced <= id_range.1
                 });
                 if !already {
                     last_variants.push(QueryWord::new_full(maybe_replaced, result.edit_distance));
@@ -472,59 +494,11 @@ impl FuzzyPhraseSet {
         }
     }
 
-    pub fn fuzzy_match<T: AsRef<str>>(&self, phrase: &[T], max_word_dist: u8, max_phrase_dist: u8) -> Result<Vec<FuzzyMatchResult>, Box<Error>> {
-        // strategy: look up each word in the fuzzy graph
-        // and then construct a vector of vectors representing all the word variants that could reside in each slot
-        // in the phrase, and then recursively enumerate every combination of variants and look them each up in the phrase graph
-
-        let mut word_possibilities: Vec<Vec<QueryWord>> = Vec::with_capacity(phrase.len());
-
-        let edit_distance = if max_word_dist > self.max_edit_distance {
-            return Err(Box::new(PhraseSetError::new(format!(
-                "The maximum configured edit distance for this index is {}; {} requested",
-                self.max_edit_distance,
-                max_word_dist
-            ).as_str())));
-        } else {
-            max_word_dist
-        };
-
-        // the map is executed lazily, so we can early-bail without correcting everything
-        for matches in phrase.iter().map(|word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance)) {
-            match matches? {
-                Some(possibilities) => word_possibilities.push(possibilities),
-                None => return Ok(Vec::new()),
-            }
-        }
-
-        let phrase_matches = self.phrase_set.match_combinations(&word_possibilities, max_phrase_dist)?;
-
-        let mut results: Vec<FuzzyMatchResult> = Vec::new();
-        for phrase_p in &phrase_matches {
-            results.push(FuzzyMatchResult {
-                phrase: phrase_p.iter().map(|qw| match qw {
-                    QueryWord::Full { id, .. } => self.word_list[*id as usize].clone(),
-                    _ => panic!("prefixes not allowed"),
-                }).collect::<Vec<String>>(),
-                edit_distance: phrase_p.iter().map(|qw| match qw {
-                    QueryWord::Full { edit_distance, .. } => *edit_distance,
-                    _ => panic!("prefixes not allowed"),
-                }).sum(),
-            });
-        }
-
-        Ok(results)
-    }
-
-    pub fn fuzzy_match_str(&self, phrase: &str, max_word_dist: u8, max_phrase_dist: u8) -> Result<Vec<FuzzyMatchResult>, Box<Error>> {
-        let phrase_v: Vec<&str> = phrase.split(' ').collect();
-        self.fuzzy_match(&phrase_v, max_word_dist, max_phrase_dist)
-    }
-
-    pub fn fuzzy_match_prefix<T: AsRef<str>>(&self, phrase: &[T], max_word_dist: u8, max_phrase_dist: u8) -> Result<Vec<FuzzyMatchResult>, Box<Error>> {
+    pub fn fuzzy_match<T: AsRef<str>>(&self, phrase: &[T], max_word_dist: u8, max_phrase_dist: u8, ending_type: EndingType) -> Result<Vec<FuzzyMatchResult>, Box<Error>> {
         // strategy: look up each word in the fuzzy graph, and also look up the last one in the prefix graph
-        // and then construct a vector of vectors representing all the word variants that could reside in each slot
-        // in the phrase, and then recursively enumerate every combination of variants and look them each up in the phrase graph
+        // if the ending type allows for partial words (so, is AnyPrefix), and then construct a vector of
+        // vectors representing all the word variants that could reside in each slot in the phrase, and
+        // then recursively enumerate every combination of variants and look them each up in the phrase graph
 
         let mut word_possibilities: Vec<Vec<QueryWord>> = Vec::with_capacity(phrase.len());
 
@@ -544,43 +518,76 @@ impl FuzzyPhraseSet {
 
         // all words but the last one: fuzzy-lookup if eligible, or exact-match if not,
         // and return nothing if those fail
-        let last_idx = phrase.len() - 1;
-        for matches in phrase[..last_idx].iter().map(|word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance)) {
-            match matches? {
-                Some(possibilities) => word_possibilities.push(possibilities),
-                None => return Ok(Vec::new()),
+        match ending_type {
+            EndingType::NonPrefix | EndingType::WordBoundaryPrefix => {
+                for matches in phrase.iter().map(|word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance)) {
+                    match matches? {
+                        Some(possibilities) => word_possibilities.push(possibilities),
+                        None => return Ok(Vec::new()),
+                    }
+                }
+            },
+            EndingType::AnyPrefix => {
+                let last_idx = phrase.len() - 1;
+                for matches in phrase[..last_idx].iter().map(|word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance)) {
+                    match matches? {
+                        Some(possibilities) => word_possibilities.push(possibilities),
+                        None => return Ok(Vec::new()),
+                    }
+                }
+                match self.get_terminal_word_possibilities(phrase[last_idx].as_ref(), edit_distance)? {
+                    Some(possibilities) => word_possibilities.push(possibilities),
+                    None => return Ok(Vec::new()),
+                }
             }
         }
-        match self.get_terminal_word_possibilities(phrase[last_idx].as_ref(), edit_distance)? {
-            Some(possibilities) => word_possibilities.push(possibilities),
-            None => return Ok(Vec::new()),
-        }
 
-        let phrase_matches = self.phrase_set.match_combinations_as_prefixes(&word_possibilities, max_phrase_dist)?;
+
+        let phrase_matches = match ending_type {
+            EndingType::NonPrefix => {
+                self.phrase_set.match_combinations(&word_possibilities, max_phrase_dist)?
+            },
+            EndingType::WordBoundaryPrefix | EndingType::AnyPrefix => {
+                self.phrase_set.match_combinations_as_prefixes(&word_possibilities, max_phrase_dist)?
+            }
+        };
 
         let mut results: Vec<FuzzyMatchResult> = Vec::new();
-        for phrase_p in &phrase_matches {
+        for combination in &phrase_matches {
             results.push(FuzzyMatchResult {
-                phrase: phrase_p.iter().enumerate().map(|(i, qw)| match qw {
+                phrase: combination.phrase.iter().enumerate().map(|(i, qw)| match qw {
                     QueryWord::Full { id, .. } => self.word_list[*id as usize].clone(),
                     QueryWord::Prefix { .. } => phrase[i].as_ref().to_owned(),
                 }).collect::<Vec<String>>(),
-                edit_distance: phrase_p.iter().map(|qw| match qw {
+                edit_distance: combination.phrase.iter().map(|qw| match qw {
                     QueryWord::Full { edit_distance, .. } => *edit_distance,
                     QueryWord::Prefix { .. } => 0u8,
                 }).sum(),
+                ending_type: match ending_type {
+                    EndingType::NonPrefix | EndingType::WordBoundaryPrefix => ending_type,
+                    EndingType::AnyPrefix => {
+                        match combination.phrase.last() {
+                            None => EndingType::NonPrefix,
+                            Some(qw) => match qw {
+                                QueryWord::Full { .. } => EndingType::WordBoundaryPrefix,
+                                QueryWord::Prefix { .. } => EndingType::AnyPrefix,
+                            }
+                        }
+                    }
+                },
+                phrase_id_range: (combination.output_range.0.value() as u32, combination.output_range.1.value() as u32)
             })
         }
 
         Ok(results)
     }
 
-    pub fn fuzzy_match_prefix_str(&self, phrase: &str, max_word_dist: u8, max_phrase_dist: u8) -> Result<Vec<FuzzyMatchResult>, Box<Error>> {
+    pub fn fuzzy_match_str(&self, phrase: &str, max_word_dist: u8, max_phrase_dist: u8, ending_type: EndingType) -> Result<Vec<FuzzyMatchResult>, Box<Error>> {
         let phrase_v: Vec<&str> = phrase.split(' ').collect();
-        self.fuzzy_match_prefix(&phrase_v, max_word_dist, max_phrase_dist)
+        self.fuzzy_match(&phrase_v, max_word_dist, max_phrase_dist, ending_type)
     }
 
-    pub fn fuzzy_match_windows<T: AsRef<str>>(&self, phrase: &[T], max_word_dist: u8, max_phrase_dist: u8, ends_in_prefix: bool) -> Result<Vec<FuzzyWindowResult>, Box<Error>> {
+    pub fn fuzzy_match_windows<T: AsRef<str>>(&self, phrase: &[T], max_word_dist: u8, max_phrase_dist: u8, ending_type: EndingType) -> Result<Vec<FuzzyWindowResult>, Box<Error>> {
         // this is a little different than the regular fuzzy match in that we're considering
         // multiple possible substrings we'll start by trying to fuzzy-match all the words, but
         // some of those will likely fail -- rather than early-returning like in regular fuzzy
@@ -616,7 +623,7 @@ impl FuzzyPhraseSet {
         #[derive(Debug)]
         struct Subquery {
             start_position: usize,
-            ends_in_prefix: bool,
+            ending_type: EndingType,
             word_possibilities: Vec<Vec<QueryWord>>
         }
         let mut subqueries: Vec<Subquery> = Vec::new();
@@ -632,24 +639,28 @@ impl FuzzyPhraseSet {
         };
 
         // this block creates an iterator of possible fuzzy matches for each word in phrase
-        let seq: Box<Iterator<Item=Result<Option<Vec<QueryWord>>, Box<Error>>>> = if ends_in_prefix {
-            // if the phrase ends in a prefix
-            let last_idx = phrase.len() - 1;
-            let i = phrase[..last_idx].iter().map(
-                // call this function on every word except the last one
-                |word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance)
-            ).chain(iter::once(last_idx).map(
-                // call this function on the last word (the prefix)
-                |idx| self.get_terminal_word_possibilities(phrase[idx].as_ref(), edit_distance))
-            );
-            Box::new(i)
-        } else {
-            let i = phrase.iter().map(|word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance));
-            Box::new(i)
+        let seq: Box<Iterator<Item=Result<Option<Vec<QueryWord>>, Box<Error>>>> = match ending_type {
+            EndingType::AnyPrefix => {
+                // if the phrase ends in an arbitrary prefix (so, final word could be partial)
+                let last_idx = phrase.len() - 1;
+                let i = phrase[..last_idx].iter().map(
+                    // call this function on every word except the last one
+                    |word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance)
+                ).chain(iter::once(last_idx).map(
+                    // call this function on the last word (the prefix)
+                    |idx| self.get_terminal_word_possibilities(phrase[idx].as_ref(), edit_distance))
+                );
+                Box::new(i)
+            },
+            _ => {
+                // word either doesn't end in a prefix, or ends in a prefix we know is a full word
+                let i = phrase.iter().map(|word| self.get_nonterminal_word_possibilities(word.as_ref(), edit_distance));
+                Box::new(i)
+            }
         };
 
         // the sq variable starts off set to default variables.
-        let mut sq: Subquery = Subquery { start_position: 0, ends_in_prefix: false, word_possibilities: Vec::new() };
+        let mut sq: Subquery = Subquery { start_position: 0, ending_type: EndingType::NonPrefix, word_possibilities: Vec::new() };
 
         // Continuing with the example from above:
         //
@@ -679,13 +690,13 @@ impl FuzzyPhraseSet {
                     if sq.word_possibilities.len() > 0 {
                         // if the word_possibilities for the subquery built so far is non-empty,
                         // that means there's something to do
-                        if i == phrase.len() && ends_in_prefix {
-                            sq.ends_in_prefix = true;
+                        if i == phrase.len() {
+                            sq.ending_type = ending_type;
                         }
                         // push this subquery into the result array.
                         subqueries.push(sq);
                         // if reset the sq variable to the same default values after each loop.
-                        sq = Subquery { start_position: 0, ends_in_prefix: false, word_possibilities: Vec::new() };
+                        sq = Subquery { start_position: 0, ending_type: EndingType::NonPrefix, word_possibilities: Vec::new() };
                     }
                 },
             }
@@ -702,23 +713,41 @@ impl FuzzyPhraseSet {
         let mut results: Vec<FuzzyWindowResult> = Vec::new();
         for chunk in subqueries.iter() {
             for i in 0..chunk.word_possibilities.len() {
-                let mut phrase_matches = self.phrase_set.match_combinations_as_windows(
+                let phrase_matches = self.phrase_set.match_combinations_as_windows(
                     &chunk.word_possibilities[i..],
                     max_phrase_dist,
-                    chunk.ends_in_prefix
+                    match chunk.ending_type {
+                        EndingType::NonPrefix => false,
+                        _ => true
+                    }
                 )?;
-                for (phrase_p, sq_ends_in_prefix) in &phrase_matches {
+                for match_sq in &phrase_matches {
                     results.push(FuzzyWindowResult {
-                        phrase: phrase_p.iter().enumerate().map(|(j, qw)| match qw {
+                        phrase: match_sq.phrase.iter().enumerate().map(|(j, qw)| match qw {
                             QueryWord::Full { id, .. } => self.word_list[*id as usize].clone(),
                             QueryWord::Prefix { .. } => phrase[chunk.start_position + i + j].as_ref().to_owned(),
                         }).collect::<Vec<String>>(),
-                        edit_distance: phrase_p.iter().map(|qw| match qw {
+                        edit_distance: match_sq.phrase.iter().map(|qw| match qw {
                             QueryWord::Full { edit_distance, .. } => *edit_distance,
                             QueryWord::Prefix { .. } => 0u8,
                         }).sum(),
                         start_position: chunk.start_position + i,
-                        ends_in_prefix: *sq_ends_in_prefix,
+                        ending_type: match match_sq.ends_in_prefix {
+                            false => EndingType::NonPrefix,
+                            true => match ending_type {
+                                EndingType::NonPrefix | EndingType::WordBoundaryPrefix => ending_type,
+                                EndingType::AnyPrefix => {
+                                    match match_sq.phrase.last() {
+                                        None => EndingType::NonPrefix,
+                                        Some(qw) => match qw {
+                                            QueryWord::Full { .. } => EndingType::WordBoundaryPrefix,
+                                            QueryWord::Prefix { .. } => EndingType::AnyPrefix,
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        phrase_id_range: (match_sq.output_range.0.value() as u32, match_sq.output_range.1.value() as u32)
                     })
                 }
             }
@@ -727,7 +756,7 @@ impl FuzzyPhraseSet {
         Ok(results)
     }
 
-    pub fn fuzzy_match_multi<T: AsRef<str> + Ord + Debug, U: AsRef<[T]>>(&self, phrases: &[(U, bool)], max_word_dist: u8, max_phrase_dist: u8) -> Result<Vec<Vec<FuzzyMatchResult>>, Box<Error>> {
+    pub fn fuzzy_match_multi<T: AsRef<str> + Ord + Debug, U: AsRef<[T]>>(&self, phrases: &[(U, EndingType)], max_word_dist: u8, max_phrase_dist: u8) -> Result<Vec<Vec<FuzzyMatchResult>>, Box<Error>> {
 
         // This is roughly equivalent to `fuzzy_match_windows` in purpose, but operating under
         // the assumption that the caller will have wanted to make some changes to some of the
@@ -742,7 +771,7 @@ impl FuzzyPhraseSet {
         // The input is a slice of tuples of a phrase (slice of str-ish things) and a bool
         // representing ends_in_prefix-ness. The output here will be mapped positionally to the
         // input, so it'll be a vector of the same size as the input slice, where each position
-        // should contain the same results as a fuzzy_match or fuzzy_match_prefix of that phrase.
+        // should contain the same results as a fuzzy_match of that phrase.
 
         if phrases.len() == 0 {
             return Ok(Vec::new());
@@ -760,39 +789,42 @@ impl FuzzyPhraseSet {
 
         // fuzzy-lookup all the words, but only once apiece (per prefix-y-ness type)
         let mut all_words: FxHashMap<(&str, bool), Vec<QueryWord>> = FxHashMap::default();
-        let mut indexed_phrases: Vec<(&[T], bool, usize)> = Vec::new();
-        for (i, (phrase, ends_in_prefix)) in phrases.iter().enumerate() {
+        let mut indexed_phrases: Vec<(&[T], EndingType, usize)> = Vec::new();
+        for (i, (phrase, ending_type)) in phrases.iter().enumerate() {
             let phrase = phrase.as_ref();
-            if *ends_in_prefix {
-                let last_idx = phrase.len() - 1;
-                for word in phrase[..last_idx].iter() {
-                    let word = word.as_ref();
-                    if let hash_map::Entry::Vacant(entry) = all_words.entry((word, false)) {
+            match ending_type {
+                EndingType::AnyPrefix => {
+                    let last_idx = phrase.len() - 1;
+                    for word in phrase[..last_idx].iter() {
+                        let word = word.as_ref();
+                        if let hash_map::Entry::Vacant(entry) = all_words.entry((word, false)) {
+                            entry.insert(
+                                self.get_nonterminal_word_possibilities(word, edit_distance)?
+                                    .unwrap_or_else(|| Vec::with_capacity(0))
+                            );
+                        }
+                    }
+                    let last_word = phrase[last_idx].as_ref();
+                    if let hash_map::Entry::Vacant(entry) = all_words.entry((last_word, true)) {
                         entry.insert(
-                            self.get_nonterminal_word_possibilities(word, edit_distance)?
+                            self.get_terminal_word_possibilities(last_word, edit_distance)?
                                 .unwrap_or_else(|| Vec::with_capacity(0))
                         );
                     }
-                }
-                let last_word = phrase[last_idx].as_ref();
-                if let hash_map::Entry::Vacant(entry) = all_words.entry((last_word, true)) {
-                    entry.insert(
-                        self.get_terminal_word_possibilities(last_word, edit_distance)?
-                            .unwrap_or_else(|| Vec::with_capacity(0))
-                    );
-                }
-            } else {
-                for word in phrase.iter() {
-                    let word = word.as_ref();
-                    if let hash_map::Entry::Vacant(entry) = all_words.entry((word, false)) {
-                        entry.insert(
-                            self.get_nonterminal_word_possibilities(word, edit_distance)?
-                                .unwrap_or_else(|| Vec::with_capacity(0))
-                        );
+                },
+                EndingType::NonPrefix | EndingType::WordBoundaryPrefix => {
+                    for word in phrase.iter() {
+                        let word = word.as_ref();
+                        if let hash_map::Entry::Vacant(entry) = all_words.entry((word, false)) {
+                            entry.insert(
+                                self.get_nonterminal_word_possibilities(word, edit_distance)?
+                                    .unwrap_or_else(|| Vec::with_capacity(0))
+                            );
+                        }
                     }
                 }
             }
-            indexed_phrases.push((phrase, *ends_in_prefix, i));
+            indexed_phrases.push((phrase, *ending_type, i));
         }
 
         // First, `indexed_phrases` is sorted lexicographically according to the 0th member of each
@@ -811,7 +843,7 @@ impl FuzzyPhraseSet {
         indexed_phrases.sort();
 
         // Now we'll identify clusters of phrases consisting of a longest phrase together with
-        // shorter phrases that are prefixes of that longest phrase (and also not ends_with_prefix)
+        // shorter phrases that are prefixes of that longest phrase (and also not end in non-prefix)
         // so that we can just recurse over the phrase graph for the longest phrase and catch
         // any non-prefix-terminal shorter phrases along the way
         let mut collapsed: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
@@ -824,7 +856,8 @@ impl FuzzyPhraseSet {
                 Some(peek) => {
                     // we're done with a group if...
                     // ...the current item ends in a prefix
-                    item.1 ||
+                    let ends_in_prefix = match item.1 { EndingType::NonPrefix => false, _ => true };
+                    ends_in_prefix ||
                         // ...or the next item is shorter than the current one, meaning the current
                         // one can't be a prefix of the next
                         peek.0.len() <= item.0.len() ||
@@ -852,7 +885,15 @@ impl FuzzyPhraseSet {
             // Reuse the possibilities vector
             word_possibilities.clear();
             let longest_phrase = &phrases[*longest_idx].0.as_ref();
-            let ends_in_prefix = phrases[*longest_idx].1;
+            let ending_type = phrases[*longest_idx].1;
+            let phrase_ends_in_prefix = match ending_type {
+                EndingType::NonPrefix => false,
+                _ => true
+            };
+            let final_word_ends_in_prefix = match ending_type {
+                EndingType::NonPrefix | EndingType::WordBoundaryPrefix => false,
+                _ => true
+            };
             for word in longest_phrase[..(longest_phrase.len() - 1)].iter() {
                 word_possibilities.push(
                     all_words.get(&(word.as_ref(), false))
@@ -860,14 +901,14 @@ impl FuzzyPhraseSet {
                 );
             }
             word_possibilities.push(
-                all_words.get(&(longest_phrase[longest_phrase.len() - 1].as_ref(), ends_in_prefix))
+                all_words.get(&(longest_phrase[longest_phrase.len() - 1].as_ref(), final_word_ends_in_prefix))
                     .ok_or("Can't find corrected word")?.clone()
             );
 
             let phrase_matches = self.phrase_set.match_combinations_as_windows(
                 &word_possibilities,
                 max_phrase_dist,
-                ends_in_prefix
+                phrase_ends_in_prefix
             )?;
 
             // Within this prefix cluster we have different things of different lengths and
@@ -875,29 +916,67 @@ impl FuzzyPhraseSet {
             // should be ascribed to their matching entries in the cluster so they can be inserted
             // into the right output slot.
             let length_map: FxHashMap<(usize, bool), usize> = all_idxes.iter().map(
-                |&idx| ((phrases[idx].0.as_ref().len(), phrases[idx].1), idx)
+                |&idx| ((phrases[idx].0.as_ref().len(), match phrases[idx].1 {
+                    EndingType::NonPrefix => false,
+                    _ => true
+                }), idx)
             ).collect();
 
-            for (phrase_p, sq_ends_in_prefix) in &phrase_matches {
+            for match_sq in &phrase_matches {
                 // We might have found results in our phrase graph traversal that we weren't
                 // actually look for -- we'll ignore those and only add results if they match
-                if let Some(&input_idx) = length_map.get(&(phrase_p.len(), *sq_ends_in_prefix)) {
+                if let Some(&input_idx) = length_map.get(&(match_sq.phrase.len(), match_sq.ends_in_prefix)) {
                     let input_phrase = phrases[input_idx].0.as_ref();
                     results[input_idx].push(FuzzyMatchResult {
-                        phrase: phrase_p.iter().enumerate().map(|(i, qw)| match qw {
+                        phrase: match_sq.phrase.iter().enumerate().map(|(i, qw)| match qw {
                             QueryWord::Full { id, .. } => self.word_list[*id as usize].clone(),
                             QueryWord::Prefix { .. } => input_phrase[i].as_ref().to_owned(),
                         }).collect::<Vec<String>>(),
-                        edit_distance: phrase_p.iter().map(|qw| match qw {
+                        edit_distance: match_sq.phrase.iter().map(|qw| match qw {
                             QueryWord::Full { edit_distance, .. } => *edit_distance,
                             QueryWord::Prefix { .. } => 0u8,
                         }).sum(),
+                        ending_type: match match_sq.ends_in_prefix {
+                            false => EndingType::NonPrefix,
+                            true => match ending_type {
+                                EndingType::NonPrefix | EndingType::WordBoundaryPrefix => ending_type,
+                                EndingType::AnyPrefix => {
+                                    match match_sq.phrase.last() {
+                                        None => EndingType::NonPrefix,
+                                        Some(qw) => match qw {
+                                            QueryWord::Full { .. } => EndingType::WordBoundaryPrefix,
+                                            QueryWord::Prefix { .. } => EndingType::AnyPrefix,
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        phrase_id_range: (match_sq.output_range.0.value() as u32, match_sq.output_range.1.value() as u32)
                     });
                 }
             }
         }
 
         Ok(results)
+    }
+
+    /// Given a phrase ID, this function returns the words in the phrase
+    pub fn get_by_phrase_id(&self, id: u32) -> Result<Option<Vec<String>>, Box<dyn Error>> {
+        match self.phrase_set.get_by_id(Output::new(id as u64)) {
+            Some(word_ids) => {
+                Ok(Some(word_ids.iter().map(|id| self.word_list[*id as usize].clone()).collect()))
+            },
+            None => Ok(None)
+        }
+    }
+
+    pub fn get_prefix_bins(&self, max_bin_size: usize) -> Result<Vec<bins::PrefixBin>, Box<dyn Error>> {
+        let max_id = self.phrase_set.get_max_id();
+        let fst = self.phrase_set.as_fst();
+
+        let bins = bins::subdivide_word(fst, &fst.root(), Output::new(0), max_id, max_bin_size, &self.word_list);
+
+        Ok(bins.into_iter().map(|group| group.prefix_bin).collect())
     }
 }
 
@@ -910,14 +989,24 @@ mod basic_tests {
 
     lazy_static! {
         static ref DIR: tempfile::TempDir = tempfile::tempdir().unwrap();
-        static ref SET: FuzzyPhraseSet = {
+        static ref PHRASES: Vec<&'static str> = {
+            vec![
+                "100 main street",
+                "200 main street",
+                "100 main ave",
+                "300 mlk blvd"
+            ]
+        };
+        static ref TMP_TO_FINAL: Vec<u32> = {
             let mut builder = FuzzyPhraseSetBuilder::new(&DIR.path()).unwrap();
             builder.insert_str("100 main street").unwrap();
             builder.insert_str("200 main street").unwrap();
             builder.insert_str("100 main ave").unwrap();
             builder.insert_str("300 mlk blvd").unwrap();
-            builder.finish().unwrap();
-
+            builder.finish().unwrap()
+        };
+        static ref SET: FuzzyPhraseSet = {
+            lazy_static::initialize(&TMP_TO_FINAL);
             FuzzyPhraseSet::from_path(&DIR.path()).unwrap()
         };
     }
@@ -946,10 +1035,10 @@ mod basic_tests {
     #[test]
     fn glue_contains() -> () {
         // contains
-        assert!(SET.contains_str("100 main street").unwrap());
-        assert!(SET.contains_str("200 main street").unwrap());
-        assert!(SET.contains_str("100 main ave").unwrap());
-        assert!(SET.contains_str("300 mlk blvd").unwrap());
+        assert!(SET.contains_str("100 main street", EndingType::NonPrefix).unwrap());
+        assert!(SET.contains_str("200 main street", EndingType::NonPrefix).unwrap());
+        assert!(SET.contains_str("100 main ave", EndingType::NonPrefix).unwrap());
+        assert!(SET.contains_str("300 mlk blvd", EndingType::NonPrefix).unwrap());
     }
 
     #[test]
@@ -957,112 +1046,168 @@ mod basic_tests {
         // test that we're generic over vectors and arrays, and also Strings and strs
         // testing this for contains because it's simplest, but we reuse this pattern elsewhere,
         // e.g., for insert
-        assert!(SET.contains_str("100 main street").unwrap());
+        assert!(SET.contains_str("100 main street", EndingType::NonPrefix).unwrap());
         let phrase_static = ["100", "main", "street"];
-        assert!(SET.contains(&phrase_static).unwrap());
+        assert!(SET.contains(&phrase_static, EndingType::NonPrefix).unwrap());
         let phrase_vec: Vec<String> = vec!["100".to_string(), "main".to_string(), "street".to_string()];
-        assert!(SET.contains(&phrase_vec).unwrap());
+        assert!(SET.contains(&phrase_vec, EndingType::NonPrefix).unwrap());
         let ref_phrase_vec: Vec<&str> = phrase_vec.iter().map(|s| s.as_str()).collect();
-        assert!(SET.contains(&ref_phrase_vec).unwrap());
+        assert!(SET.contains(&ref_phrase_vec, EndingType::NonPrefix).unwrap());
     }
 
     #[test]
     fn glue_doesnt_contain() -> () {
-        assert!(!SET.contains_str("x").unwrap());
-        assert!(!SET.contains_str("100 main").unwrap());
-        assert!(!SET.contains_str("100 main s").unwrap());
-        assert!(!SET.contains_str("100 main streetr").unwrap());
-        assert!(!SET.contains_str("100 main street r").unwrap());
-        assert!(!SET.contains_str("100 main street ave").unwrap());
+        assert!(!SET.contains_str("x", EndingType::NonPrefix).unwrap());
+        assert!(!SET.contains_str("100 main", EndingType::NonPrefix).unwrap());
+        assert!(!SET.contains_str("100 main s", EndingType::NonPrefix).unwrap());
+        assert!(!SET.contains_str("100 main streetr", EndingType::NonPrefix).unwrap());
+        assert!(!SET.contains_str("100 main street r", EndingType::NonPrefix).unwrap());
+        assert!(!SET.contains_str("100 main street ave", EndingType::NonPrefix).unwrap());
     }
 
     #[test]
     fn glue_contains_prefix_exact() -> () {
         // contains prefix -- everything that works in full works as prefix
-        assert!(SET.contains_prefix_str("100 main street").unwrap());
-        assert!(SET.contains_prefix_str("200 main street").unwrap());
-        assert!(SET.contains_prefix_str("100 main ave").unwrap());
-        assert!(SET.contains_prefix_str("300 mlk blvd").unwrap());
+        assert!(SET.contains_str("100 main street", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("200 main street", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("100 main ave", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("300 mlk blvd", EndingType::AnyPrefix).unwrap());
     }
 
     #[test]
     fn glue_contains_prefix_partial_word() -> () {
         // contains prefix -- drop a letter
-        assert!(SET.contains_prefix_str("100 main stree").unwrap());
-        assert!(SET.contains_prefix_str("200 main stree").unwrap());
-        assert!(SET.contains_prefix_str("100 main av").unwrap());
-        assert!(SET.contains_prefix_str("300 mlk blv").unwrap());
+        assert!(SET.contains_str("100 main stree", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("200 main stree", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("100 main av", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("300 mlk blv", EndingType::AnyPrefix).unwrap());
+        // but not with word boundary matching
+        assert!(!SET.contains_str("100 main stree", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(!SET.contains_str("200 main stree", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(!SET.contains_str("100 main av", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(!SET.contains_str("300 mlk blv", EndingType::WordBoundaryPrefix).unwrap());
     }
 
     #[test]
     fn glue_contains_prefix_dropped_word() -> () {
-        // contains prefix -- drop a word
-        assert!(SET.contains_prefix_str("100 main").unwrap());
-        assert!(SET.contains_prefix_str("200 main").unwrap());
-        assert!(SET.contains_prefix_str("100 main").unwrap());
-        assert!(SET.contains_prefix_str("300 mlk").unwrap());
+        // contains prefix -- drop a word; should work with both kinds of prefix matching
+        assert!(SET.contains_str("100 main", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("200 main", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("100 main", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("300 mlk", EndingType::AnyPrefix).unwrap());
+        assert!(SET.contains_str("100 main", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(SET.contains_str("200 main", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(SET.contains_str("100 main", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(SET.contains_str("300 mlk", EndingType::WordBoundaryPrefix).unwrap());
     }
 
     #[test]
     fn glue_doesnt_contain_prefix() -> () {
         // contains prefix -- drop a word
-        assert!(!SET.contains_prefix_str("100 man").unwrap());
-        assert!(!SET.contains_prefix_str("400 main").unwrap());
-        assert!(!SET.contains_prefix_str("100 main street x").unwrap());
+        assert!(!SET.contains_str("100 man", EndingType::AnyPrefix).unwrap());
+        assert!(!SET.contains_str("400 main", EndingType::AnyPrefix).unwrap());
+        assert!(!SET.contains_str("100 main street x", EndingType::AnyPrefix).unwrap());
+        assert!(!SET.contains_str("100 man", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(!SET.contains_str("400 main", EndingType::WordBoundaryPrefix).unwrap());
+        assert!(!SET.contains_str("100 main street x", EndingType::WordBoundaryPrefix).unwrap());
     }
 
     #[test]
     fn glue_fuzzy_match() -> () {
         assert_eq!(
-            SET.fuzzy_match(&["100", "man", "street"], 1, 1).unwrap(),
+            SET.fuzzy_match(&["100", "man", "street"], 1, 1, EndingType::NonPrefix).unwrap(),
             vec![
-                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 1 },
+                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 1, ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) },
             ]
         );
 
         assert_eq!(
-            SET.fuzzy_match(&["100", "man", "stret"], 1, 2).unwrap(),
+            SET.fuzzy_match(&["100", "man", "stret"], 1, 2, EndingType::NonPrefix).unwrap(),
             vec![
-                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 2 },
+                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 2, ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) },
             ]
         );
 
-        assert!(SET.fuzzy_match(&["100", "man", "stret"], 2, 2).is_err());
+        assert!(SET.fuzzy_match(&["100", "man", "stret"], 2, 2, EndingType::NonPrefix).is_err());
     }
 
     #[test]
     fn glue_fuzzy_match_prefix() -> () {
         assert_eq!(
-            SET.fuzzy_match_prefix(&["100", "man"], 1, 1).unwrap(),
+            SET.fuzzy_match(&["100", "man"], 1, 1, EndingType::AnyPrefix).unwrap(),
             vec![
-                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string()], edit_distance: 1 },
+                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string()], edit_distance: 1, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (0, 1) },
             ]
         );
 
         assert_eq!(
-            SET.fuzzy_match_prefix(&["100", "man", "str"], 1, 1).unwrap(),
+            SET.fuzzy_match(&["100", "man"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
             vec![
-                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "str".to_string()], edit_distance: 1 },
+                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string()], edit_distance: 1, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (0, 1) },
             ]
         );
 
-        assert!(SET.fuzzy_match_prefix(&["100", "man"], 2, 1).is_err());
+        assert_eq!(
+            SET.fuzzy_match(&["100", "man", "str"], 1, 1, EndingType::AnyPrefix).unwrap(),
+            vec![
+                FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "str".to_string()], edit_distance: 1, ending_type: EndingType::AnyPrefix, phrase_id_range: (1, 1) },
+            ]
+        );
+        assert_eq!(
+            SET.fuzzy_match(&["100", "man", "str"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
+            vec![]
+        );
+
+        assert!(SET.fuzzy_match(&["100", "man"], 2, 1, EndingType::AnyPrefix).is_err());
+    }
+
+    #[test]
+    fn glue_fuzzy_match_confirm_ids() {
+        for (i, phrase) in PHRASES.iter().enumerate() {
+            let expected_id = TMP_TO_FINAL[i];
+            let result = SET.fuzzy_match_str(phrase, 0, 0, EndingType::NonPrefix).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!((expected_id, expected_id), result[0].phrase_id_range);
+        }
     }
 
     #[test]
     fn glue_fuzzy_match_windows() -> () {
         assert_eq!(
-            SET.fuzzy_match_windows(&["100", "main", "street", "washington", "300"], 1, 1, true).unwrap(),
+            SET.fuzzy_match_windows(&["100", "main", "street", "washington", "30"], 1, 1, EndingType::AnyPrefix).unwrap(),
             vec![
-                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: false },
-                FuzzyWindowResult { phrase: vec!["300".to_string()], edit_distance: 0, start_position: 4, ends_in_prefix: true }
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) },
+                FuzzyWindowResult { phrase: vec!["30".to_string()], edit_distance: 0, start_position: 4, ending_type: EndingType::AnyPrefix, phrase_id_range: (3, 3) }
             ]
         );
 
         assert_eq!(
-            SET.fuzzy_match_windows(&["100", "main", "street", "washington", "300"], 1, 1, false).unwrap(),
+            SET.fuzzy_match_windows(&["100", "main", "street", "washington", "300"], 1, 1, EndingType::AnyPrefix).unwrap(),
             vec![
-                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: false },
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) },
+                FuzzyWindowResult { phrase: vec!["300".to_string()], edit_distance: 0, start_position: 4, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }
+            ]
+        );
+
+        assert_eq!(
+            SET.fuzzy_match_windows(&["100", "main", "street", "washington", "30"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
+            vec![
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) },
+            ]
+        );
+
+        assert_eq!(
+            SET.fuzzy_match_windows(&["100", "main", "street", "washington", "300"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
+            vec![
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) },
+                FuzzyWindowResult { phrase: vec!["300".to_string()], edit_distance: 0, start_position: 4, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }
+            ]
+        );
+
+        assert_eq!(
+            SET.fuzzy_match_windows(&["100", "main", "street", "washington", "300"], 1, 1, EndingType::NonPrefix).unwrap(),
+            vec![
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::NonPrefix, phrase_id_range: (1, 1) },
             ]
         );
     }
@@ -1071,22 +1216,39 @@ mod basic_tests {
     fn glue_fuzzy_match_multi() -> () {
         assert_eq!(
             SET.fuzzy_match_multi(&[
-                (vec!["100"], false),
-                (vec!["100", "main"], false),
-                (vec!["100", "main", "street"], true),
-                (vec!["300"], false),
-                (vec!["300", "mlk"], false),
-                (vec!["300", "mlk", "blvd"], true),
+                (vec!["100"], EndingType::NonPrefix),
+                (vec!["100", "main"], EndingType::NonPrefix),
+                (vec!["100", "main", "stre"], EndingType::AnyPrefix),
+                (vec!["100", "main", "stre"], EndingType::WordBoundaryPrefix),
+                (vec!["100", "main", "street"], EndingType::AnyPrefix),
+                (vec!["100", "main", "street"], EndingType::WordBoundaryPrefix),
+                (vec!["300"], EndingType::NonPrefix),
+                (vec!["300", "mlk"], EndingType::NonPrefix),
+                (vec!["300", "mlk", "blvd"], EndingType::AnyPrefix),
             ], 1, 1).unwrap(),
             vec![
                 vec![],
                 vec![],
-                vec![FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0 }],
+                vec![FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "stre".to_string()], edit_distance: 0, ending_type: EndingType::AnyPrefix, phrase_id_range: (1, 1) }],
+                vec![],
+                vec![FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }],
+                vec![FuzzyMatchResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }],
                 vec![],
                 vec![],
-                vec![FuzzyMatchResult { phrase: vec!["300".to_string(), "mlk".to_string(), "blvd".to_string()], edit_distance: 0 }]
+                vec![FuzzyMatchResult { phrase: vec!["300".to_string(), "mlk".to_string(), "blvd".to_string()], edit_distance: 0, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }]
             ]
         );
+    }
+
+    #[test]
+    fn get_by_id() {
+        let mut phrases = PHRASES.clone();
+        phrases.sort();
+        for (i, phrase) in phrases.iter().enumerate() {
+            let split: Vec<_> = phrase.split(" ").map(|w| w.to_owned()).collect();
+            assert_eq!(split, SET.get_by_phrase_id(i as u32).unwrap().unwrap());
+        }
+        assert!(SET.get_by_phrase_id(PHRASES.len() as u32).unwrap().is_none());
     }
 
     lazy_static! {
@@ -1109,37 +1271,48 @@ mod basic_tests {
     #[test]
     fn fuzzy_match_windows() -> () {
         let empty_struct = Vec::<FuzzyWindowResult>::new();
-        //address present in the data, hence should match
+        // address present in the data, hence should match
+        // emits a word boundary prefix because there's exactly one termination and we matched it
         assert_eq!(
-            TEST_SET.fuzzy_match_windows(&["100", "main", "street"], 1, 1, true).unwrap(),
-            vec![FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: true }]
+            TEST_SET.fuzzy_match_windows(&["100", "main", "street"], 1, 1, EndingType::AnyPrefix).unwrap(),
+            vec![FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "street".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (3, 3) }]
         );
         //address not present in the data, hence should not match
         assert_eq!(
-            TEST_SET.fuzzy_match_windows(&["0", "incorrect", "query"], 1, 1, true).unwrap(),
+            TEST_SET.fuzzy_match_windows(&["0", "incorrect", "query"], 1, 1, EndingType::AnyPrefix).unwrap(),
             empty_struct
         );
         //end of one address is the beginning of another address
         assert_eq!(
-            TEST_SET.fuzzy_match_windows(&["100", "main", "st"], 1, 1, false).unwrap(),
+            TEST_SET.fuzzy_match_windows(&["100", "main", "st"], 1, 1, EndingType::NonPrefix).unwrap(),
             vec![
-                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: false }
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::NonPrefix, phrase_id_range: (2, 2) }
             ]
         );
         //address contains words in another address
         assert_eq!(
-            TEST_SET.fuzzy_match_windows(&["100", "st", "washington"], 1, 1, false).unwrap(),
+            TEST_SET.fuzzy_match_windows(&["100", "st", "washington"], 1, 1, EndingType::NonPrefix).unwrap(),
             vec![
-                FuzzyWindowResult { phrase: vec!["100".to_string(), "st".to_string(), "washington".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: false }
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "st".to_string(), "washington".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::NonPrefix, phrase_id_range: (4, 4) }
             ]
         );
         //autocomplete is applied only to the last term
         assert_eq!(
-            TEST_SET.fuzzy_match_windows(&["100", "main", "st"], 1, 1, true).unwrap(),
+            TEST_SET.fuzzy_match_windows(&["100", "main", "st"], 1, 1, EndingType::AnyPrefix).unwrap(),
             vec![
-                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: true },
-                FuzzyWindowResult { phrase: vec!["St".to_string()], edit_distance: 1, start_position: 2, ends_in_prefix: true }
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "st".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::AnyPrefix, phrase_id_range: (2, 3) },
+                FuzzyWindowResult { phrase: vec!["St".to_string()], edit_distance: 1, start_position: 2, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (5, 5) }
             ]
+        );
+        assert_eq!(
+            TEST_SET.fuzzy_match_windows(&["100", "main", "s"], 1, 1, EndingType::AnyPrefix).unwrap(),
+            vec![
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "main".to_string(), "s".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::AnyPrefix, phrase_id_range: (2, 3) },
+            ]
+        );
+        assert_eq!(
+            TEST_SET.fuzzy_match_windows(&["100", "main", "s"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
+            empty_struct
         );
     }
 
@@ -1147,14 +1320,24 @@ mod basic_tests {
     fn multi_search_fuzzy_match_equivalence() -> () {
         assert_eq!(
             TEST_SET.fuzzy_match_multi(&[
-                (vec!["100"], false),
-                (vec!["100", "main"], false),
-                (vec!["100", "main", "street"], true)
+                (vec!["100"], EndingType::NonPrefix),
+                (vec!["100", "main"], EndingType::NonPrefix),
+                (vec!["100", "main"], EndingType::WordBoundaryPrefix),
+                (vec!["100", "main", "stre"], EndingType::NonPrefix),
+                (vec!["100", "main", "stre"], EndingType::WordBoundaryPrefix),
+                (vec!["100", "main", "stre"], EndingType::AnyPrefix),
+                (vec!["100", "main", "street"], EndingType::WordBoundaryPrefix),
+                (vec!["100", "main", "street"], EndingType::AnyPrefix),
             ], 1, 1).unwrap(),
             vec![
-                TEST_SET.fuzzy_match(&["100"], 1, 1).unwrap(),
-                TEST_SET.fuzzy_match(&["100", "main"], 1, 1).unwrap(),
-                TEST_SET.fuzzy_match(&["100", "main", "street"], 1, 1).unwrap()
+                TEST_SET.fuzzy_match(&["100"], 1, 1, EndingType::NonPrefix).unwrap(),
+                TEST_SET.fuzzy_match(&["100", "main"], 1, 1, EndingType::NonPrefix).unwrap(),
+                TEST_SET.fuzzy_match(&["100", "main"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
+                TEST_SET.fuzzy_match(&["100", "main", "stre"], 1, 1, EndingType::NonPrefix).unwrap(),
+                TEST_SET.fuzzy_match(&["100", "main", "stre"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
+                TEST_SET.fuzzy_match(&["100", "main", "stre"], 1, 1, EndingType::AnyPrefix).unwrap(),
+                TEST_SET.fuzzy_match(&["100", "main", "street"], 1, 1, EndingType::WordBoundaryPrefix).unwrap(),
+                TEST_SET.fuzzy_match(&["100", "main", "street"], 1, 1, EndingType::AnyPrefix).unwrap(),
             ]
         );
     }
@@ -1163,32 +1346,33 @@ mod basic_tests {
     fn one_char_skip() -> () {
         // confirm that we don't match e when we ask for d because of the one-char rule
         assert_eq!(
-            TEST_SET.fuzzy_match_windows(&["100", "d", "st"], 1, 1, true).unwrap(),
+            TEST_SET.fuzzy_match_windows(&["100", "d", "st"], 1, 1, EndingType::AnyPrefix).unwrap(),
             vec![
-                FuzzyWindowResult { phrase: vec!["100".to_string(), "d".to_string(), "st".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: true },
-                FuzzyWindowResult { phrase: vec!["St".to_string()], edit_distance: 1, start_position: 2, ends_in_prefix: true }
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "d".to_string(), "st".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::AnyPrefix, phrase_id_range: (0, 0) },
+                FuzzyWindowResult { phrase: vec!["St".to_string()], edit_distance: 1, start_position: 2, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (5, 5) }
             ]
         );
 
         // same when it's in the terminal position
         assert_eq!(
-            TEST_SET.fuzzy_match_windows(&["100", "e"], 1, 1, true).unwrap(),
+            TEST_SET.fuzzy_match_windows(&["100", "e"], 1, 1, EndingType::AnyPrefix).unwrap(),
             vec![
-                FuzzyWindowResult { phrase: vec!["100".to_string(), "e".to_string()], edit_distance: 0, start_position: 0, ends_in_prefix: true },
+                FuzzyWindowResult { phrase: vec!["100".to_string(), "e".to_string()], edit_distance: 0, start_position: 0, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) },
             ]
         );
 
         // and on multi
         assert_eq!(
             TEST_SET.fuzzy_match_multi(&[
-                (vec!["100", "e"], true),
+                (vec!["100", "e"], EndingType::AnyPrefix),
             ], 1, 1).unwrap(),
             vec![
-                vec![FuzzyMatchResult { phrase: vec!["100".to_string(), "e".to_string()], edit_distance: 0 }],
+                vec![FuzzyMatchResult { phrase: vec!["100".to_string(), "e".to_string()], edit_distance: 0, ending_type: EndingType::WordBoundaryPrefix, phrase_id_range: (1, 1) }],
             ]
         );
     }
 }
 
 #[cfg(test)] mod replacement_tests;
+#[cfg(test)] mod bin_tests;
 #[cfg(test)] mod fuzz_tests;
